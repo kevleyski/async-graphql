@@ -1,0 +1,7 @@
+# .graphqlconfig=/Users/kevin.staunton-lambert/workspace/github_kevleyski/async-graphql!
+
+query {
+    human(id:"1000") {
+        name
+    }
+}
