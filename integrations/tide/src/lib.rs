@@ -8,29 +8,27 @@
 #![allow(clippy::needless_doctest_main)]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "websocket")]
 mod subscription;
 
-use async_graphql::http::MultipartOptions;
-use async_graphql::{ObjectType, ParseRequestError, Schema, SubscriptionType};
-use tide::utils::async_trait;
+use async_graphql::{http::MultipartOptions, Executor, ParseRequestError};
+#[cfg(feature = "websocket")]
+pub use subscription::GraphQLSubscription;
 use tide::{
     http::{
         headers::{self, HeaderValue},
         Method,
     },
+    utils::async_trait,
     Body, Request, Response, StatusCode,
 };
 
-pub use subscription::Subscription;
-
-/// Create a new GraphQL endpoint with the schema.
+/// Create a new GraphQL endpoint with the executor.
 ///
 /// Default multipart options are used and batch operations are supported.
-pub fn endpoint<Query, Mutation, Subscription>(
-    schema: Schema<Query, Mutation, Subscription>,
-) -> Endpoint<Query, Mutation, Subscription> {
-    Endpoint {
-        schema,
+pub fn graphql<E>(executor: E) -> GraphQLEndpoint<E> {
+    GraphQLEndpoint {
+        executor,
         opts: MultipartOptions::default(),
         batch: true,
     }
@@ -40,16 +38,16 @@ pub fn endpoint<Query, Mutation, Subscription>(
 ///
 /// This is created with the [`endpoint`](fn.endpoint.html) function.
 #[non_exhaustive]
-pub struct Endpoint<Query, Mutation, Subscription> {
-    /// The schema of the endpoint.
-    pub schema: Schema<Query, Mutation, Subscription>,
+pub struct GraphQLEndpoint<E> {
+    /// The graphql executor
+    pub executor: E,
     /// The multipart options of the endpoint.
     pub opts: MultipartOptions,
     /// Whether to support batch requests in the endpoint.
     pub batch: bool,
 }
 
-impl<Query, Mutation, Subscription> Endpoint<Query, Mutation, Subscription> {
+impl<E> GraphQLEndpoint<E> {
     /// Set the multipart options of the endpoint.
     #[must_use]
     pub fn multipart_opts(self, opts: MultipartOptions) -> Self {
@@ -63,10 +61,10 @@ impl<Query, Mutation, Subscription> Endpoint<Query, Mutation, Subscription> {
 }
 
 // Manual impl to remove bounds on generics
-impl<Query, Mutation, Subscription> Clone for Endpoint<Query, Mutation, Subscription> {
+impl<E: Executor> Clone for GraphQLEndpoint<E> {
     fn clone(&self) -> Self {
         Self {
-            schema: self.schema.clone(),
+            executor: self.executor.clone(),
             opts: self.opts,
             batch: self.batch,
         }
@@ -74,17 +72,14 @@ impl<Query, Mutation, Subscription> Clone for Endpoint<Query, Mutation, Subscrip
 }
 
 #[async_trait]
-impl<Query, Mutation, Subscription, TideState> tide::Endpoint<TideState>
-    for Endpoint<Query, Mutation, Subscription>
+impl<E, TideState> tide::Endpoint<TideState> for GraphQLEndpoint<E>
 where
-    Query: ObjectType + 'static,
-    Mutation: ObjectType + 'static,
-    Subscription: SubscriptionType + 'static,
+    E: Executor,
     TideState: Clone + Send + Sync + 'static,
 {
     async fn call(&self, request: Request<TideState>) -> tide::Result {
         respond(
-            self.schema
+            self.executor
                 .execute_batch(if self.batch {
                     receive_batch_request_opts(request, self.opts).await
                 } else {
@@ -104,7 +99,8 @@ pub async fn receive_request<State: Clone + Send + Sync + 'static>(
     receive_request_opts(request, Default::default()).await
 }
 
-/// Convert a Tide request to a GraphQL request with options on how to receive multipart.
+/// Convert a Tide request to a GraphQL request with options on how to receive
+/// multipart.
 pub async fn receive_request_opts<State: Clone + Send + Sync + 'static>(
     request: Request<State>,
     opts: MultipartOptions,
@@ -122,13 +118,16 @@ pub async fn receive_batch_request<State: Clone + Send + Sync + 'static>(
     receive_batch_request_opts(request, Default::default()).await
 }
 
-/// Convert a Tide request to a GraphQL batch request with options on how to receive multipart.
+/// Convert a Tide request to a GraphQL batch request with options on how to
+/// receive multipart.
 pub async fn receive_batch_request_opts<State: Clone + Send + Sync + 'static>(
     mut request: Request<State>,
     opts: MultipartOptions,
 ) -> tide::Result<async_graphql::BatchRequest> {
     if request.method() == Method::Get {
-        request.query::<async_graphql::Request>().map(Into::into)
+        async_graphql::http::parse_query_string(request.url().query().unwrap_or_default())
+            .map(Into::into)
+            .map_err(|err| tide::Error::new(StatusCode::BadRequest, err))
     } else if request.method() == Method::Post {
         let body = request.take_body();
         let content_type = request
@@ -165,9 +164,13 @@ pub fn respond(resp: impl Into<async_graphql::BatchResponse>) -> tide::Result {
             response.insert_header(headers::CACHE_CONTROL, cache_control);
         }
     }
-    for (name, value) in resp.http_headers() {
-        response.append_header(name, value);
+
+    for (name, value) in resp.http_headers_iter() {
+        if let Ok(value) = value.to_str() {
+            response.append_header(name.as_str(), value);
+        }
     }
+
     response.set_body(Body::from_json(&resp)?);
     Ok(response)
 }

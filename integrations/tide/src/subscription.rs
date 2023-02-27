@@ -1,61 +1,70 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::str::FromStr;
+use std::{future::Future, str::FromStr};
 
-use async_graphql::http::{WebSocket as AGWebSocket, WebSocketProtocols, WsMessage};
-use async_graphql::{Data, ObjectType, Result, Schema, SubscriptionType};
-use futures_util::{future, StreamExt};
-use tide::{Endpoint, Request, Response};
-use tide_websockets::Message;
+use async_graphql::{
+    http::{WebSocket as AGWebSocket, WebSocketProtocols, WsMessage, ALL_WEBSOCKET_PROTOCOLS},
+    Data, Executor, Result,
+};
+use futures_util::{future, future::Ready, StreamExt};
+use tide::Endpoint;
+use tide_websockets::{tungstenite::protocol::CloseFrame, Message};
 
-/// GraphQL subscription endpoint.
-pub struct Subscription<S> {
-    inner: Pin<Box<dyn Endpoint<S>>>,
+/// A GraphQL subscription endpoint builder.
+#[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
+pub struct GraphQLSubscription<E, OnConnInit> {
+    executor: E,
+    on_connection_init: OnConnInit,
 }
 
-#[async_trait::async_trait]
-impl<S> Endpoint<S> for Subscription<S>
+type DefaultOnConnInitType = fn(serde_json::Value) -> Ready<async_graphql::Result<Data>>;
+
+fn default_on_connection_init(_: serde_json::Value) -> Ready<async_graphql::Result<Data>> {
+    futures_util::future::ready(Ok(Data::default()))
+}
+
+impl<E> GraphQLSubscription<E, DefaultOnConnInitType>
 where
-    S: Send + Sync + Clone + 'static,
+    E: Executor,
 {
-    async fn call(&self, req: Request<S>) -> tide::Result<Response> {
-        self.inner.call(req).await
+    /// Create a [`GraphQLSubscription`] object.
+    pub fn new(executor: E) -> Self {
+        GraphQLSubscription {
+            executor,
+            on_connection_init: default_on_connection_init,
+        }
     }
 }
 
-impl<S> Subscription<S>
+impl<E, OnConnInit, OnConnInitFut> GraphQLSubscription<E, OnConnInit>
 where
-    S: Send + Sync + Clone + 'static,
+    E: Executor,
+    OnConnInit: Fn(serde_json::Value) -> OnConnInitFut + Clone + Send + Sync + 'static,
+    OnConnInitFut: Future<Output = async_graphql::Result<Data>> + Send + 'static,
 {
-    /// Create a graphql subscription endpoint.
-    pub fn new<Query, Mutation, Subscription>(schema: Schema<Query, Mutation, Subscription>) -> Self
-    where
-        Query: ObjectType + 'static,
-        Mutation: ObjectType + 'static,
-        Subscription: SubscriptionType + 'static,
-    {
-        Self::new_with_initializer(schema, |_| {
-            futures_util::future::ready(Ok(Default::default()))
-        })
-    }
-
-    /// Create a graphql subscription endpoint.
+    /// Specify a callback function to be called when the connection is
+    /// initialized.
     ///
-    /// Specifies that a function converts the init payload to data.
-    pub fn new_with_initializer<Query, Mutation, Subscription, F, R>(
-        schema: Schema<Query, Mutation, Subscription>,
-        initializer: F,
-    ) -> Self
+    /// You can get something from the payload of [`GQL_CONNECTION_INIT` message](https://github.com/apollographql/subscriptions-transport-ws/blob/master/PROTOCOL.md#gql_connection_init) to create [`Data`].
+    /// The data returned by this callback function will be merged with the data
+    /// specified by [`with_data`].
+    pub fn on_connection_init<OnConnInit2, Fut>(
+        self,
+        callback: OnConnInit2,
+    ) -> GraphQLSubscription<E, OnConnInit2>
     where
-        Query: ObjectType + 'static,
-        Mutation: ObjectType + 'static,
-        Subscription: SubscriptionType + 'static,
-        F: FnOnce(serde_json::Value) -> R + Unpin + Send + Sync + Clone + 'static,
-        R: Future<Output = Result<Data>> + Send + 'static,
+        OnConnInit2: Fn(serde_json::Value) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = async_graphql::Result<Data>> + Send + 'static,
     {
-        let endpoint = tide_websockets::WebSocket::<S, _>::new(move |request, connection| {
-            let schema = schema.clone();
-            let initializer = initializer.clone();
+        GraphQLSubscription {
+            executor: self.executor,
+            on_connection_init: callback,
+        }
+    }
+
+    /// Consumes this builder to create a tide endpoint.
+    pub fn build<S: Send + Sync + Clone + 'static>(self) -> impl Endpoint<S> {
+        tide_websockets::WebSocket::<S, _>::new(move |request, connection| {
+            let executor = self.executor.clone();
+            let on_connection_init = self.on_connection_init.clone();
             async move {
                 let protocol = match request
                     .header("sec-websocket-protocol")
@@ -73,15 +82,16 @@ where
                 };
 
                 let sink = connection.clone();
-                let mut stream = AGWebSocket::with_data(
-                    schema.clone(),
+                let mut stream = AGWebSocket::new(
+                    executor.clone(),
                     connection
                         .take_while(|msg| future::ready(msg.is_ok()))
                         .map(Result::unwrap)
                         .map(Message::into_data),
-                    initializer,
                     protocol,
-                );
+                )
+                .on_connection_init(on_connection_init);
+
                 while let Some(data) = stream.next().await {
                     match data {
                         WsMessage::Text(text) => {
@@ -89,8 +99,13 @@ where
                                 break;
                             }
                         }
-                        WsMessage::Close(_code, _msg) => {
-                            // TODO: Send close frame
+                        WsMessage::Close(code, msg) => {
+                            let _ = sink
+                                .send(Message::Close(Some(CloseFrame {
+                                    code: code.into(),
+                                    reason: msg.into(),
+                                })))
+                                .await;
                             break;
                         }
                     }
@@ -99,9 +114,6 @@ where
                 Ok(())
             }
         })
-        .with_protocols(&["graphql-transport-ws", "graphql-ws"]);
-        Self {
-            inner: Box::pin(endpoint),
-        }
+        .with_protocols(&ALL_WEBSOCKET_PROTOCOLS)
     }
 }

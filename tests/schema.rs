@@ -1,18 +1,19 @@
+use ::http::HeaderValue;
 use async_graphql::*;
 
 #[tokio::test]
 pub async fn test_schema_default() {
     #[derive(Default)]
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    type MySchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
+    type MySchema = Schema<Query, EmptyMutation, EmptySubscription>;
 
     let _schema = MySchema::default();
 }
@@ -20,10 +21,10 @@ pub async fn test_schema_default() {
 #[tokio::test]
 pub async fn test_http_headers() {
     #[derive(Default)]
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self, ctx: &Context<'_>) -> i32 {
             ctx.insert_http_header("A", "1");
             10
@@ -35,10 +36,16 @@ pub async fn test_http_headers() {
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
     let resp = schema.execute("{ value }").await;
-    assert_eq!(resp.http_headers.get("A").map(|s| &**s), Some("1"));
+    assert_eq!(
+        resp.http_headers.get("A"),
+        Some(&HeaderValue::from_static("1"))
+    );
 
     let resp = schema.execute("{ err }").await;
-    assert_eq!(resp.http_headers.get("A").map(|s| &**s), Some("1"));
+    assert_eq!(
+        resp.http_headers.get("A"),
+        Some(&HeaderValue::from_static("1"))
+    );
 }

@@ -2,25 +2,32 @@
 //!
 //! This module's structure mirrors `types`.
 
-use crate::pos::{PositionCalculator, Positioned};
-use crate::types::*;
-use crate::{Error, Result};
-use pest::iterators::{Pair, Pairs};
-use pest::Parser;
-use pest_derive::Parser;
-use std::collections::hash_map::{self, HashMap};
+use std::collections::{hash_map, HashMap};
+
+use pest::{
+    iterators::{Pair, Pairs},
+    Parser,
+};
 use utils::*;
 
+use crate::{
+    pos::{PositionCalculator, Positioned},
+    types::*,
+    Error, Result,
+};
+
 mod executable;
+#[allow(clippy::redundant_static_lifetimes)]
+#[rustfmt::skip]
+mod generated;
 mod service;
 mod utils;
 
 use async_graphql_value::{ConstValue, Name, Number, Value};
 pub use executable::parse_query;
+use generated::Rule;
 pub use service::parse_schema;
 
-#[derive(Parser)]
-#[grammar = "graphql.pest"]
 struct GraphQLParser;
 
 fn parse_operation_type(
@@ -150,7 +157,11 @@ fn parse_number(pair: Pair<Rule>, pc: &mut PositionCalculator) -> Result<Positio
     debug_assert_eq!(pair.as_rule(), Rule::number);
     let pos = pc.step(&pair);
     Ok(Positioned::new(
-        pair.as_str().parse().expect("failed to parse number"),
+        pair.as_str().parse().map_err(|err| Error::Syntax {
+            message: format!("invalid number: {}", err),
+            start: pos,
+            end: None,
+        })?,
         pos,
     ))
 }
@@ -184,8 +195,8 @@ fn parse_enum_value(pair: Pair<Rule>, pc: &mut PositionCalculator) -> Result<Pos
     parse_name(exactly_one(pair.into_inner()), pc)
 }
 
-fn parse_opt_const_directives<'a>(
-    pairs: &mut Pairs<'a, Rule>,
+fn parse_opt_const_directives(
+    pairs: &mut Pairs<'_, Rule>,
     pc: &mut PositionCalculator,
 ) -> Result<Vec<Positioned<ConstDirective>>> {
     Ok(parse_if_rule(pairs, Rule::const_directives, |pair| {
@@ -193,8 +204,8 @@ fn parse_opt_const_directives<'a>(
     })?
     .unwrap_or_default())
 }
-fn parse_opt_directives<'a>(
-    pairs: &mut Pairs<'a, Rule>,
+fn parse_opt_directives(
+    pairs: &mut Pairs<'_, Rule>,
     pc: &mut PositionCalculator,
 ) -> Result<Vec<Positioned<Directive>>> {
     Ok(
@@ -311,4 +322,22 @@ fn parse_arguments(
 fn parse_name(pair: Pair<Rule>, pc: &mut PositionCalculator) -> Result<Positioned<Name>> {
     debug_assert_eq!(pair.as_rule(), Rule::name);
     Ok(Positioned::new(Name::new(pair.as_str()), pc.step(&pair)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_number_lookahead_restrictions() {
+        GraphQLParser::parse(Rule::const_list, "[123 abc]").unwrap();
+        GraphQLParser::parse(Rule::const_list, "[123.0123 abc]").unwrap();
+        GraphQLParser::parse(Rule::const_list, "[123.0123e7 abc]").unwrap();
+        GraphQLParser::parse(Rule::const_list, "[123.0123e77 abc]").unwrap();
+
+        assert!(GraphQLParser::parse(Rule::const_list, "[123abc]").is_err());
+        assert!(GraphQLParser::parse(Rule::const_list, "[123.0123abc]").is_err());
+        assert!(GraphQLParser::parse(Rule::const_list, "[123.0123e7abc]").is_err());
+        assert!(GraphQLParser::parse(Rule::const_list, "[123.0123e77abc]").is_err());
+    }
 }

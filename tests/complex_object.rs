@@ -1,8 +1,49 @@
-use async_graphql::*;
 use core::marker::PhantomData;
+
+use async_graphql::*;
+
+#[tokio::test]
+async fn test_complex_object_process_with_method_field() {
+    #[derive(SimpleObject)]
+    #[graphql(complex)]
+    struct MyObj {
+        a: i32,
+    }
+
+    #[ComplexObject]
+    impl MyObj {
+        async fn test(
+            &self,
+            #[graphql(process_with = "str::make_ascii_uppercase")] processed_complex_arg: String,
+        ) -> String {
+            processed_complex_arg
+        }
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> MyObj {
+            MyObj { a: 10 }
+        }
+    }
+
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    let query = "{ obj { test(processedComplexArg: \"smol\") } }";
+    assert_eq!(
+        schema.execute(query).await.into_result().unwrap().data,
+        value!({
+            "obj": {
+                "test": "SMOL"
+            }
+        })
+    );
+}
 
 #[tokio::test]
 pub async fn test_complex_object() {
+    /// A complex object.
     #[derive(SimpleObject)]
     #[graphql(complex)]
     struct MyObj {
@@ -12,11 +53,13 @@ pub async fn test_complex_object() {
 
     #[ComplexObject]
     impl MyObj {
+        /// A field named `c`.
         async fn c(&self) -> i32 {
             self.a + self.b
         }
 
-        async fn d(&self, v: i32) -> i32 {
+        /// A field named `d`.
+        async fn d(&self, #[graphql(desc = "An argument named `v`.")] v: i32) -> i32 {
             self.a + self.b + v
         }
     }
@@ -296,6 +339,198 @@ pub async fn test_complex_object_with_generic_concrete_type() {
                         },
                     },
                 ]
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn test_flatten() {
+    #[derive(SimpleObject)]
+    struct A {
+        a: i32,
+        b: i32,
+    }
+
+    #[derive(SimpleObject)]
+    #[graphql(complex)]
+    struct B {
+        #[graphql(skip)]
+        a: A,
+        c: i32,
+    }
+
+    #[ComplexObject]
+    impl B {
+        #[graphql(flatten)]
+        async fn a(&self) -> &A {
+            &self.a
+        }
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> B {
+            B {
+                a: A { a: 100, b: 200 },
+                c: 300,
+            }
+        }
+    }
+
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    let query = "{ __type(name: \"B\") { fields { name } } }";
+    assert_eq!(
+        schema.execute(query).await.data,
+        value!({
+            "__type": {
+                "fields": [
+                    {"name": "c"},
+                    {"name": "a"},
+                    {"name": "b"}
+                ]
+            }
+        })
+    );
+
+    let query = "{ obj { a b c } }";
+    assert_eq!(
+        schema.execute(query).await.data,
+        value!({
+            "obj": {
+                "a": 100,
+                "b": 200,
+                "c": 300,
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn test_flatten_with_context() {
+    #[derive(SimpleObject)]
+    struct A {
+        a: i32,
+        b: i32,
+    }
+
+    #[derive(SimpleObject)]
+    #[graphql(complex)]
+    struct B {
+        #[graphql(skip)]
+        a: A,
+        c: i32,
+    }
+
+    #[ComplexObject]
+    impl B {
+        #[graphql(flatten)]
+        async fn a(&self, _ctx: &Context<'_>) -> &A {
+            &self.a
+        }
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> B {
+            B {
+                a: A { a: 100, b: 200 },
+                c: 300,
+            }
+        }
+    }
+
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    let query = "{ __type(name: \"B\") { fields { name } } }";
+    assert_eq!(
+        schema.execute(query).await.data,
+        value!({
+            "__type": {
+                "fields": [
+                    {"name": "c"},
+                    {"name": "a"},
+                    {"name": "b"}
+                ]
+            }
+        })
+    );
+
+    let query = "{ obj { a b c } }";
+    assert_eq!(
+        schema.execute(query).await.data,
+        value!({
+            "obj": {
+                "a": 100,
+                "b": 200,
+                "c": 300,
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn test_flatten_with_result() {
+    #[derive(SimpleObject)]
+    struct A {
+        a: i32,
+        b: i32,
+    }
+
+    #[derive(SimpleObject)]
+    #[graphql(complex)]
+    struct B {
+        #[graphql(skip)]
+        a: A,
+        c: i32,
+    }
+
+    #[ComplexObject]
+    impl B {
+        #[graphql(flatten)]
+        async fn a(&self) -> FieldResult<&A> {
+            Ok(&self.a)
+        }
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> B {
+            B {
+                a: A { a: 100, b: 200 },
+                c: 300,
+            }
+        }
+    }
+
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    let query = "{ __type(name: \"B\") { fields { name } } }";
+    assert_eq!(
+        schema.execute(query).await.data,
+        value!({
+            "__type": {
+                "fields": [
+                    {"name": "c"},
+                    {"name": "a"},
+                    {"name": "b"}
+                ]
+            }
+        })
+    );
+
+    let query = "{ obj { a b c } }";
+    assert_eq!(
+        schema.execute(query).await.data,
+        value!({
+            "obj": {
+                "a": 100,
+                "b": 200,
+                "c": 300,
             }
         })
     );

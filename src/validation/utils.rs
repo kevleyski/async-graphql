@@ -2,9 +2,7 @@ use std::collections::HashSet;
 
 use async_graphql_value::{ConstValue, Value};
 
-use crate::context::QueryPathNode;
-use crate::error::Error;
-use crate::{registry, QueryPathSegment};
+use crate::{context::QueryPathNode, registry, QueryPathSegment};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Scope<'a> {
@@ -42,12 +40,13 @@ pub fn is_valid_input_value(
     type_name: &str,
     value: &ConstValue,
     path_node: QueryPathNode,
-) -> Option<Error> {
+) -> Option<String> {
     match registry::MetaTypeName::create(type_name) {
         registry::MetaTypeName::NonNull(type_name) => match value {
-            ConstValue::Null => {
-                Some(valid_error(&path_node, format!("expected type \"{}\"", type_name)).into())
-            }
+            ConstValue::Null => Some(valid_error(
+                &path_node,
+                format!("expected type \"{}\"", type_name),
+            )),
             _ => is_valid_input_value(registry, type_name, value, path_node),
         },
         registry::MetaTypeName::List(type_name) => match value {
@@ -70,17 +69,25 @@ pub fn is_valid_input_value(
                 return None;
             }
 
-            match registry.types.get(type_name).unwrap() {
-                registry::MetaType::Scalar { is_valid, .. } => {
-                    if is_valid(&value) {
+            match registry
+                .types
+                .get(type_name)
+                .unwrap_or_else(|| panic!("Type `{}` not defined", type_name))
+            {
+                registry::MetaType::Scalar {
+                    is_valid: Some(is_valid_fn),
+                    ..
+                } => {
+                    if (is_valid_fn)(&value) {
                         None
                     } else {
-                        Some(
-                            valid_error(&path_node, format!("expected type \"{}\"", type_name))
-                                .into(),
-                        )
+                        Some(valid_error(
+                            &path_node,
+                            format!("expected type \"{}\"", type_name),
+                        ))
                     }
                 }
+                registry::MetaType::Scalar { is_valid: None, .. } => None,
                 registry::MetaType::Enum {
                     enum_values,
                     name: enum_name,
@@ -88,72 +95,73 @@ pub fn is_valid_input_value(
                 } => match value {
                     ConstValue::Enum(name) => {
                         if !enum_values.contains_key(name.as_str()) {
-                            Some(
-                                valid_error(
-                                    &path_node,
-                                    format!(
-                                        "enumeration type \"{}\" does not contain the value \"{}\"",
-                                        enum_name, name
-                                    ),
-                                )
-                                .into(),
-                            )
+                            Some(valid_error(
+                                &path_node,
+                                format!(
+                                    "enumeration type \"{}\" does not contain the value \"{}\"",
+                                    enum_name, name
+                                ),
+                            ))
                         } else {
                             None
                         }
                     }
                     ConstValue::String(name) => {
                         if !enum_values.contains_key(name.as_str()) {
-                            Some(
-                                valid_error(
-                                    &path_node,
-                                    format!(
-                                        "enumeration type \"{}\" does not contain the value \"{}\"",
-                                        enum_name, name
-                                    ),
-                                )
-                                .into(),
-                            )
+                            Some(valid_error(
+                                &path_node,
+                                format!(
+                                    "enumeration type \"{}\" does not contain the value \"{}\"",
+                                    enum_name, name
+                                ),
+                            ))
                         } else {
                             None
                         }
                     }
-                    _ => Some(
-                        valid_error(&path_node, format!("expected type \"{}\"", type_name)).into(),
-                    ),
+                    _ => Some(valid_error(
+                        &path_node,
+                        format!("expected type \"{}\"", type_name),
+                    )),
                 },
                 registry::MetaType::InputObject {
                     input_fields,
                     name: object_name,
+                    oneof,
                     ..
                 } => match value {
                     ConstValue::Object(values) => {
+                        if *oneof {
+                            if values.len() != 1 {
+                                return Some(valid_error(
+                                    &path_node,
+                                    "Oneof input objects requires have exactly one field"
+                                        .to_string(),
+                                ));
+                            }
+
+                            if let ConstValue::Null = values[0] {
+                                return Some(valid_error(
+                                    &path_node,
+                                    "Oneof Input Objects require that exactly one field must be supplied and that field must not be null"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+
                         let mut input_names =
                             values.keys().map(AsRef::as_ref).collect::<HashSet<_>>();
 
                         for field in input_fields.values() {
-                            input_names.remove(field.name);
-                            if let Some(value) = values.get(field.name) {
-                                if let Some(validator) = &field.validator {
-                                    if let Err(mut e) = validator.is_valid_with_extensions(value) {
-                                        e.message = valid_error(
-                                            &QueryPathNode {
-                                                parent: Some(&path_node),
-                                                segment: QueryPathSegment::Name(field.name),
-                                            },
-                                            e.message,
-                                        );
-                                        return Some(e);
-                                    }
-                                }
-
+                            input_names.remove(&*field.name);
+                            if let Some(value) = values.get(&*field.name) {
                                 if let Some(reason) = is_valid_input_value(
                                     registry,
                                     &field.ty,
                                     value,
                                     QueryPathNode {
                                         parent: Some(&path_node),
-                                        segment: QueryPathSegment::Name(field.name),
+                                        segment: QueryPathSegment::Name(&field.name),
                                     },
                                 ) {
                                     return Some(reason);
@@ -161,30 +169,21 @@ pub fn is_valid_input_value(
                             } else if registry::MetaTypeName::create(&field.ty).is_non_null()
                                 && field.default_value.is_none()
                             {
-                                return Some(
-                                    valid_error(
-                                        &path_node,
-                                        format!(
-                                        "field \"{}\" of type \"{}\" is required but not provided",
-                                        field.name, object_name,
+                                return Some(valid_error(
+                                    &path_node,
+                                    format!(
+                                        r#"field "{}" of type "{}" is required but not provided"#,
+                                        field.name, field.ty,
                                     ),
-                                    )
-                                    .into(),
-                                );
+                                ));
                             }
                         }
 
                         if let Some(name) = input_names.iter().next() {
-                            return Some(
-                                valid_error(
-                                    &path_node,
-                                    format!(
-                                        "unknown field \"{}\" of type \"{}\"",
-                                        name, object_name
-                                    ),
-                                )
-                                .into(),
-                            );
+                            return Some(valid_error(
+                                &path_node,
+                                format!("unknown field \"{}\" of type \"{}\"", name, object_name),
+                            ));
                         }
 
                         None

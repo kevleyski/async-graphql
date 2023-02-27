@@ -1,17 +1,18 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::ext::IdentExt;
 use syn::{
-    Block, Error, FnArg, ImplItem, ItemImpl, Pat, ReturnType, Type, TypeImplTrait, TypeParamBound,
-    TypeReference,
+    ext::IdentExt, Block, Error, ImplItem, ItemImpl, ReturnType, Type, TypeImplTrait,
+    TypeParamBound,
 };
 
-use crate::args::{self, ComplexityType, RenameRuleExt, RenameTarget, SubscriptionField};
-use crate::output_type::OutputType;
-use crate::utils::{
-    gen_deprecation, generate_default, generate_guards, generate_validator, get_cfg_attrs,
-    get_crate_name, get_param_getter_ident, get_rustdoc, get_type_path_and_name,
-    parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs, visible_fn, GeneratorResult,
+use crate::{
+    args::{self, ComplexityType, RenameRuleExt, RenameTarget, SubscriptionField},
+    output_type::OutputType,
+    utils::{
+        extract_input_args, gen_deprecation, generate_default, generate_guards, get_cfg_attrs,
+        get_crate_name, get_rustdoc, get_type_path_and_name, parse_complexity_expr,
+        parse_graphql_attrs, remove_graphql_attrs, visible_fn, GeneratorResult,
+    },
 };
 
 pub fn generate(
@@ -24,16 +25,21 @@ pub fn generate(
     let where_clause = &item_impl.generics.where_clause;
     let extends = subscription_args.extends;
 
-    let gql_typename = subscription_args
-        .name
-        .clone()
-        .unwrap_or_else(|| RenameTarget::Type.rename(self_name.clone()));
+    let gql_typename = if !subscription_args.name_type {
+        let name = subscription_args
+            .name
+            .clone()
+            .unwrap_or_else(|| RenameTarget::Type.rename(self_name.clone()));
+        quote!(::std::borrow::Cow::Borrowed(#name))
+    } else {
+        quote!(<Self as #crate_name::TypeName>::type_name())
+    };
 
     let desc = if subscription_args.use_type_description {
-        quote! { ::std::option::Option::Some(<Self as #crate_name::Description>::description()) }
+        quote! { ::std::option::Option::Some(::std::string::ToString::to_string(<Self as #crate_name::Description>::description())) }
     } else {
         get_rustdoc(&item_impl.attrs)?
-            .map(|s| quote!(::std::option::Option::Some(#s)))
+            .map(|s| quote!(::std::option::Option::Some(::std::string::ToString::to_string(#s))))
             .unwrap_or_else(|| quote!(::std::option::Option::None))
     };
 
@@ -48,14 +54,14 @@ pub fn generate(
                 continue;
             }
 
-            let ident = &method.sig.ident;
+            let ident = method.sig.ident.clone();
             let field_name = field.name.clone().unwrap_or_else(|| {
                 subscription_args
                     .rename_fields
                     .rename(method.sig.ident.unraw().to_string(), RenameTarget::Field)
             });
             let field_desc = get_rustdoc(&method.attrs)?
-                .map(|s| quote! {::std::option::Option::Some(#s)})
+                .map(|s| quote! {::std::option::Option::Some(::std::string::ToString::to_string(#s))})
                 .unwrap_or_else(|| quote! {::std::option::Option::None});
             let field_deprecation = gen_deprecation(&field.deprecation, &crate_name);
             let cfg_attrs = get_cfg_attrs(&method.attrs);
@@ -68,79 +74,10 @@ pub fn generate(
                 .into());
             }
 
-            let ty = match &method.sig.output {
-                ReturnType::Type(_, ty) => OutputType::parse(ty)?,
-                ReturnType::Default => {
-                    return Err(Error::new_spanned(
-                        &method.sig.output,
-                        "Resolver must have a return type",
-                    )
-                    .into())
-                }
-            };
-
-            let mut create_ctx = true;
-            let mut args = Vec::new();
-
-            for (idx, arg) in method.sig.inputs.iter_mut().enumerate() {
-                if let FnArg::Receiver(receiver) = arg {
-                    if idx != 0 {
-                        return Err(Error::new_spanned(
-                            receiver,
-                            "The self receiver must be the first parameter.",
-                        )
-                        .into());
-                    }
-                } else if let FnArg::Typed(pat) = arg {
-                    if idx == 0 {
-                        return Err(Error::new_spanned(
-                            pat,
-                            "The self receiver must be the first parameter.",
-                        )
-                        .into());
-                    }
-
-                    match (&*pat.pat, &*pat.ty) {
-                        (Pat::Ident(arg_ident), Type::Path(arg_ty)) => {
-                            args.push((
-                                arg_ident.clone(),
-                                arg_ty.clone(),
-                                parse_graphql_attrs::<args::SubscriptionFieldArgument>(&pat.attrs)?
-                                    .unwrap_or_default(),
-                            ));
-                            remove_graphql_attrs(&mut pat.attrs);
-                        }
-                        (arg, Type::Reference(TypeReference { elem, .. })) => {
-                            if let Type::Path(path) = elem.as_ref() {
-                                if idx != 1 || path.path.segments.last().unwrap().ident != "Context"
-                                {
-                                    return Err(Error::new_spanned(
-                                        arg,
-                                        "Only types that implement `InputType` can be used as input arguments.",
-                                    )
-                                    .into());
-                                } else {
-                                    create_ctx = false;
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(Error::new_spanned(arg, "Incorrect argument type").into());
-                        }
-                    }
-                } else {
-                    return Err(Error::new_spanned(arg, "Incorrect argument type").into());
-                }
-            }
-
-            if create_ctx {
-                let arg = syn::parse2::<FnArg>(quote! { _: &#crate_name::Context<'_> }).unwrap();
-                method.sig.inputs.insert(1, arg);
-            }
-
             let mut schema_args = Vec::new();
             let mut use_params = Vec::new();
             let mut get_params = Vec::new();
+            let args = extract_input_args::<args::SubscriptionFieldArgument>(&crate_name, method)?;
 
             for (
                 ident,
@@ -151,6 +88,7 @@ pub fn generate(
                     default,
                     default_with,
                     validator,
+                    process_with,
                     visible: arg_visible,
                     secret,
                 },
@@ -163,17 +101,9 @@ pub fn generate(
                 });
                 let desc = desc
                     .as_ref()
-                    .map(|s| quote! {::std::option::Option::Some(#s)})
+                    .map(|s| quote! {::std::option::Option::Some(::std::string::ToString::to_string(#s))})
                     .unwrap_or_else(|| quote! {::std::option::Option::None});
                 let default = generate_default(default, default_with)?;
-
-                let validator = match &validator {
-                    Some(meta) => {
-                        let stream = generate_validator(&crate_name, meta)?;
-                        quote!(::std::option::Option::Some(#stream))
-                    }
-                    None => quote!(::std::option::Option::None),
-                };
 
                 let schema_default = default
                     .as_ref()
@@ -188,38 +118,72 @@ pub fn generate(
 
                 let visible = visible_fn(arg_visible);
                 schema_args.push(quote! {
-                    args.insert(#name, #crate_name::registry::MetaInputValue {
-                        name: #name,
-                        description: #desc,
-                        ty: <#ty as #crate_name::Type>::create_type_info(registry),
-                        default_value: #schema_default,
-                        validator: #validator,
-                        visible: #visible,
-                        is_secret: #secret,
+                    args.insert(::std::borrow::ToOwned::to_owned(#name), #crate_name::registry::MetaInputValue {
+                            name: ::std::string::ToString::to_string(#name),
+                            description: #desc,
+                            ty: <#ty as #crate_name::InputType>::create_type_info(registry),
+                            default_value: #schema_default,
+                            visible: #visible,
+                            inaccessible: false,
+                            tags: ::std::default::Default::default(),
+                            is_secret: #secret,
+                        });
                     });
-                });
 
                 use_params.push(quote! { #ident });
 
                 let default = match default {
-                    Some(default) => quote! { ::std::option::Option::Some(|| -> #ty { #default }) },
+                    Some(default) => {
+                        quote! { ::std::option::Option::Some(|| -> #ty { #default }) }
+                    }
                     None => quote! { ::std::option::Option::None },
                 };
-                let param_getter_name = get_param_getter_ident(&ident.ident.to_string());
+
+                let param_ident = &ident.ident;
+                let process_with = match process_with.as_ref() {
+                    Some(fn_path) => {
+                        let fn_path: syn::ExprPath = syn::parse_str(fn_path)?;
+                        quote! {
+                            #fn_path(&mut #param_ident);
+                        }
+                    }
+                    None => Default::default(),
+                };
+
+                let validators = validator.clone().unwrap_or_default().create_validators(
+                    &crate_name,
+                    quote!(&#ident),
+                    Some(quote!(.map_err(|err| err.into_server_error(__pos)))),
+                )?;
+
+                let mut non_mut_ident = ident.clone();
+                non_mut_ident.mutability = None;
                 get_params.push(quote! {
+                    #[allow(non_snake_case, unused_mut)]
+                    let (__pos, mut #non_mut_ident) = ctx.param_value::<#ty>(#name, #default)?;
+                    #process_with
+                    #validators
                     #[allow(non_snake_case)]
-                    let #param_getter_name = || -> #crate_name::ServerResult<#ty> { ctx.param_value(#name, #default) };
-                    #[allow(non_snake_case)]
-                    let #ident: #ty = ctx.param_value(#name, #default)?;
+                    let #ident = #non_mut_ident;
                 });
             }
 
+            let ty = match &method.sig.output {
+                ReturnType::Type(_, ty) => OutputType::parse(ty)?,
+                ReturnType::Default => {
+                    return Err(Error::new_spanned(
+                        &method.sig.output,
+                        "Resolver must have a return type",
+                    )
+                    .into())
+                }
+            };
             let res_ty = ty.value_type();
             let stream_ty = if let Type::ImplTrait(TypeImplTrait { bounds, .. }) = &res_ty {
                 let mut r = None;
                 for b in bounds {
                     if let TypeParamBound::Trait(b) = b {
-                        r = Some(quote! { #b });
+                        r = Some(quote! { dyn #b });
                     }
                 }
                 quote! { #r }
@@ -277,8 +241,8 @@ pub fn generate(
                                     )
                                 });
                                 parse_args.push(quote! {
-                                        let #ident: #ty = __ctx.param_value(__variables_definition, __field, #name, #default)?;
-                                    });
+                                    let #ident: #ty = __ctx.param_value(__variables_definition, __field, #name, #default)?;
+                                });
                             }
                         }
                         quote! {
@@ -303,13 +267,17 @@ pub fn generate(
                         #(#schema_args)*
                         args
                     },
-                    ty: <<#stream_ty as #crate_name::futures_util::stream::Stream>::Item as #crate_name::Type>::create_type_info(registry),
+                    ty: <<#stream_ty as #crate_name::futures_util::stream::Stream>::Item as #crate_name::OutputType>::create_type_info(registry),
                     deprecation: #field_deprecation,
                     cache_control: ::std::default::Default::default(),
                     external: false,
                     requires: ::std::option::Option::None,
                     provides: ::std::option::Option::None,
+                    shareable: false,
+                    override_from: ::std::option::Option::None,
                     visible: #visible,
+                    inaccessible: false,
+                    tags: ::std::default::Default::default(),
                     compute_complexity: #complexity,
                 });
             });
@@ -320,29 +288,34 @@ pub fn generate(
                     .map_err(|err| {
                         ::std::convert::Into::<#crate_name::Error>::into(err).into_server_error(ctx.item.pos)
                             .with_path(::std::vec![#crate_name::PathSegment::Field(::std::borrow::ToOwned::to_owned(&*field_name))])
-                    })?
+                    })
             };
 
-            let guard = match &field.guard {
-                Some(meta_list) => generate_guards(&crate_name, meta_list)?,
-                None => None,
-            };
-            let guard = guard.map(|guard| quote! {
-                #guard.check(ctx).await.map_err(|err| {
+            let guard_map_err = quote! {
+                .map_err(|err| {
                     err.into_server_error(ctx.item.pos)
                         .with_path(::std::vec![#crate_name::PathSegment::Field(::std::borrow::ToOwned::to_owned(&*field_name))])
-                })?;
-            });
+                })
+            };
+            let guard = match field.guard.as_ref().or(subscription_args.guard.as_ref()) {
+                Some(code) => Some(generate_guards(&crate_name, code, guard_map_err)?),
+                None => None,
+            };
             let stream_fn = quote! {
                 let field_name = ::std::clone::Clone::clone(&ctx.item.node.response_key().node);
                 let field = ::std::sync::Arc::new(::std::clone::Clone::clone(&ctx.item));
-                #(#get_params)*
-                #guard
+
+                let f = async {
+                    #(#get_params)*
+                    #guard
+                    #create_field_stream
+                };
+                let stream = f.await.map_err(|err| ctx.set_error_path(err))?;
 
                 let pos = ctx.item.pos;
                 let schema_env = ::std::clone::Clone::clone(&ctx.schema_env);
                 let query_env = ::std::clone::Clone::clone(&ctx.query_env);
-                let stream = #crate_name::futures_util::stream::StreamExt::then(#create_field_stream, {
+                let stream = #crate_name::futures_util::stream::StreamExt::then(stream, {
                     let field_name = ::std::clone::Clone::clone(&field_name);
                     move |msg| {
                         let schema_env = ::std::clone::Clone::clone(&schema_env);
@@ -359,14 +332,16 @@ pub fn generate(
                                 &field.node.selection_set,
                             );
 
-                            let mut execute_fut = async {
+                            let execute_fut = async {
+                                let parent_type = #gql_typename;
                                 #[allow(bare_trait_objects)]
                                 let ri = #crate_name::extensions::ResolveInfo {
                                     path_node: ctx_selection_set.path_node.as_ref().unwrap(),
-                                    parent_type: #gql_typename,
-                                    return_type: &<<#stream_ty as #crate_name::futures_util::stream::Stream>::Item as #crate_name::Type>::qualified_type_name(),
+                                    parent_type: &parent_type,
+                                    return_type: &<<#stream_ty as #crate_name::futures_util::stream::Stream>::Item as #crate_name::OutputType>::qualified_type_name(),
                                     name: field.node.name.node.as_str(),
                                     alias: field.node.alias.as_ref().map(|alias| alias.node.as_str()),
+                                    is_for_introspection: false,
                                 };
                                 let resolve_fut = async {
                                     #crate_name::OutputType::resolve(&msg, &ctx_selection_set, &*field)
@@ -375,7 +350,7 @@ pub fn generate(
                                 };
                                 #crate_name::futures_util::pin_mut!(resolve_fut);
                                 let mut resp = query_env.extensions.resolve(ri, &mut resolve_fut).await.map(|value| {
-                                    let mut map = ::std::collections::BTreeMap::new();
+                                    let mut map = #crate_name::indexmap::IndexMap::new();
                                     map.insert(::std::clone::Clone::clone(&field_name), value.unwrap_or_default());
                                     #crate_name::Response::new(#crate_name::Value::Object(map))
                                 })
@@ -390,21 +365,7 @@ pub fn generate(
                         }
                     }
                 });
-                #crate_name::ServerResult::Ok(#crate_name::futures_util::stream::StreamExt::scan(
-                    stream,
-                    false,
-                    |errored, item| {
-                        if *errored {
-                            return #crate_name::futures_util::future::ready(::std::option::Option::None);
-                        }
-                        match &item {
-                            ::std::result::Result::Err(_) => *errored = true,
-                            ::std::result::Result::Ok(resp) if resp.is_err() => *errored = true,
-                            _ => {}
-                        }
-                        #crate_name::futures_util::future::ready(::std::option::Option::Some(item))
-                    },
-                ))
+                #crate_name::ServerResult::Ok(stream)
             };
 
             create_stream.push(quote! {
@@ -427,25 +388,28 @@ pub fn generate(
 
     if create_stream.is_empty() {
         return Err(Error::new_spanned(
-            &self_ty,
+            self_ty,
             "A GraphQL Object type must define one or more fields.",
         )
         .into());
     }
 
+    let visible = visible_fn(&subscription_args.visible);
+
     let expanded = quote! {
         #item_impl
 
         #[allow(clippy::all, clippy::pedantic)]
-        impl #generics #crate_name::Type for #self_ty #where_clause {
+        #[allow(unused_braces, unused_variables)]
+        impl #generics #crate_name::SubscriptionType for #self_ty #where_clause {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
-                ::std::borrow::Cow::Borrowed(#gql_typename)
+                #gql_typename
             }
 
             #[allow(bare_trait_objects)]
             fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
-                registry.create_type::<Self, _>(|registry| #crate_name::registry::MetaType::Object {
-                    name: ::std::borrow::ToOwned::to_owned(#gql_typename),
+                registry.create_subscription_type::<Self, _>(|registry| #crate_name::registry::MetaType::Object {
+                    name: ::std::borrow::Cow::into_owned(#gql_typename),
                     description: #desc,
                     fields: {
                         let mut fields = #crate_name::indexmap::IndexMap::new();
@@ -455,14 +419,15 @@ pub fn generate(
                     cache_control: ::std::default::Default::default(),
                     extends: #extends,
                     keys: ::std::option::Option::None,
-                    visible: ::std::option::Option::None,
+                    visible: #visible,
+                    shareable: false,
+                    inaccessible: false,
+                    tags: ::std::default::Default::default(),
+                    is_subscription: true,
+                    rust_typename: ::std::option::Option::Some(::std::any::type_name::<Self>()),
                 })
             }
-        }
 
-        #[allow(clippy::all, clippy::pedantic)]
-        #[allow(unused_braces, unused_variables)]
-        impl #generics #crate_name::SubscriptionType for #self_ty #where_clause {
             fn create_field_stream<'__life>(
                 &'__life self,
                 ctx: &'__life #crate_name::Context<'_>,

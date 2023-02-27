@@ -2,16 +2,19 @@ use std::sync::Arc;
 
 use async_graphql_parser::types::ExecutableDocument;
 use async_graphql_value::Variables;
-use futures_util::stream::BoxStream;
-use futures_util::TryFutureExt;
-use opentelemetry::trace::{FutureExt, SpanKind, TraceContextExt, Tracer};
-use opentelemetry::{Context as OpenTelemetryContext, Key};
-
-use crate::extensions::{
-    Extension, ExtensionContext, ExtensionFactory, NextExecute, NextParseQuery, NextRequest,
-    NextResolve, NextSubscribe, NextValidation, ResolveInfo,
+use futures_util::{stream::BoxStream, TryFutureExt};
+use opentelemetry::{
+    trace::{FutureExt, SpanKind, TraceContextExt, Tracer},
+    Context as OpenTelemetryContext, Key,
 };
-use crate::{Response, ServerError, ServerResult, ValidationResult, Value};
+
+use crate::{
+    extensions::{
+        Extension, ExtensionContext, ExtensionFactory, NextExecute, NextParseQuery, NextRequest,
+        NextResolve, NextSubscribe, NextValidation, ResolveInfo,
+    },
+    Response, ServerError, ServerResult, ValidationResult, Value,
+};
 
 const KEY_SOURCE: Key = Key::from_static_str("graphql.source");
 const KEY_VARIABLES: Key = Key::from_static_str("graphql.variables");
@@ -31,7 +34,8 @@ impl<T> OpenTelemetry<T> {
     /// Use `tracer` to create an OpenTelemetry extension.
     pub fn new(tracer: T) -> OpenTelemetry<T>
     where
-        T: Tracer + Send + Sync,
+        T: Tracer + Send + Sync + 'static,
+        <T as Tracer>::Span: Sync + Send,
     {
         Self {
             tracer: Arc::new(tracer),
@@ -39,7 +43,11 @@ impl<T> OpenTelemetry<T> {
     }
 }
 
-impl<T: Tracer + Send + Sync> ExtensionFactory for OpenTelemetry<T> {
+impl<T> ExtensionFactory for OpenTelemetry<T>
+where
+    T: Tracer + Send + Sync + 'static,
+    <T as Tracer>::Span: Sync + Send,
+{
     fn create(&self) -> Arc<dyn Extension> {
         Arc::new(OpenTelemetryExtension {
             tracer: self.tracer.clone(),
@@ -52,7 +60,11 @@ struct OpenTelemetryExtension<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: Tracer + Send + Sync> Extension for OpenTelemetryExtension<T> {
+impl<T> Extension for OpenTelemetryExtension<T>
+where
+    T: Tracer + Send + Sync + 'static,
+    <T as Tracer>::Span: Sync + Send,
+{
     async fn request(&self, ctx: &ExtensionContext<'_>, next: NextRequest<'_>) -> Response {
         next.run(ctx)
             .with_context(OpenTelemetryContext::current_with_span(
@@ -156,25 +168,35 @@ impl<T: Tracer + Send + Sync> Extension for OpenTelemetryExtension<T> {
         info: ResolveInfo<'_>,
         next: NextResolve<'_>,
     ) -> ServerResult<Option<Value>> {
-        let attributes = vec![
-            KEY_PARENT_TYPE.string(info.parent_type.to_string()),
-            KEY_RETURN_TYPE.string(info.return_type.to_string()),
-        ];
-        let span = self
-            .tracer
-            .span_builder(&info.path_node.to_string())
-            .with_kind(SpanKind::Server)
-            .with_attributes(attributes)
-            .start(&*self.tracer);
-        next.run(ctx, info)
-            .with_context(OpenTelemetryContext::current_with_span(span))
-            .map_err(|err| {
-                let current_cx = OpenTelemetryContext::current();
-                current_cx
-                    .span()
-                    .add_event("error".to_string(), vec![KEY_ERROR.string(err.to_string())]);
-                err
-            })
-            .await
+        let span = if !info.is_for_introspection {
+            let attributes = vec![
+                KEY_PARENT_TYPE.string(info.parent_type.to_string()),
+                KEY_RETURN_TYPE.string(info.return_type.to_string()),
+            ];
+            Some(
+                self.tracer
+                    .span_builder(info.path_node.to_string())
+                    .with_kind(SpanKind::Server)
+                    .with_attributes(attributes)
+                    .start(&*self.tracer),
+            )
+        } else {
+            None
+        };
+
+        let fut = next.run(ctx, info).inspect_err(|err| {
+            let current_cx = OpenTelemetryContext::current();
+            current_cx
+                .span()
+                .add_event("error".to_string(), vec![KEY_ERROR.string(err.to_string())]);
+        });
+
+        match span {
+            Some(span) => {
+                fut.with_context(OpenTelemetryContext::current_with_span(span))
+                    .await
+            }
+            None => fut.await,
+        }
     }
 }

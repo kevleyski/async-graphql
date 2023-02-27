@@ -1,16 +1,17 @@
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::Pin;
+use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::extensions::ResolveInfo;
-use crate::parser::types::Selection;
-use crate::registry::MetaType;
-use crate::{Context, ContextSelectionSet, Name, OutputType, ServerError, ServerResult, Value};
+use futures_util::FutureExt;
+use indexmap::IndexMap;
+
+use crate::{
+    extensions::ResolveInfo, parser::types::Selection, Context, ContextBase, ContextSelectionSet,
+    Error, Name, OutputType, ServerError, ServerResult, Value,
+};
 
 /// Represents a GraphQL container object.
 ///
-/// This helper trait allows the type to call `resolve_container` on itself in its
-/// `OutputType::resolve` implementation.
+/// This helper trait allows the type to call `resolve_container` on itself in
+/// its `OutputType::resolve` implementation.
 #[async_trait::async_trait]
 pub trait ContainerType: OutputType {
     /// This function returns true of type `EmptyMutation` only.
@@ -19,15 +20,17 @@ pub trait ContainerType: OutputType {
         false
     }
 
-    /// Resolves a field value and outputs it as a json value `async_graphql::Value`.
+    /// Resolves a field value and outputs it as a json value
+    /// `async_graphql::Value`.
     ///
     /// If the field was not found returns None.
     async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>>;
 
-    /// Collect all the fields of the container that are queried in the selection set.
+    /// Collect all the fields of the container that are queried in the
+    /// selection set.
     ///
-    /// Objects do not have to override this, but interfaces and unions must call it on their
-    /// internal type.
+    /// Objects do not have to override this, but interfaces and unions must
+    /// call it on their internal type.
     fn collect_all_fields<'a>(
         &'a self,
         ctx: &ContextSelectionSet<'a>,
@@ -48,13 +51,52 @@ pub trait ContainerType: OutputType {
 }
 
 #[async_trait::async_trait]
-impl<T: ContainerType> ContainerType for &T {
+impl<T: ContainerType + ?Sized> ContainerType for &T {
     async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
         T::resolve_field(*self, ctx).await
     }
 
     async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
         T::find_entity(*self, ctx, params).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: ContainerType + ?Sized> ContainerType for Arc<T> {
+    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
+        T::resolve_field(self, ctx).await
+    }
+
+    async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
+        T::find_entity(self, ctx, params).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: ContainerType + ?Sized> ContainerType for Box<T> {
+    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
+        T::resolve_field(self, ctx).await
+    }
+
+    async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
+        T::find_entity(self, ctx, params).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: ContainerType, E: Into<Error> + Send + Sync + Clone> ContainerType for Result<T, E> {
+    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
+        match self {
+            Ok(value) => T::resolve_field(value, ctx).await,
+            Err(err) => Err(ctx.set_error_path(err.clone().into().into_server_error(ctx.item.pos))),
+        }
+    }
+
+    async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
+        match self {
+            Ok(value) => T::find_entity(value, ctx, params).await,
+            Err(err) => Err(ctx.set_error_path(err.clone().into().into_server_error(ctx.item.pos))),
+        }
     }
 }
 
@@ -74,7 +116,15 @@ pub async fn resolve_container_serial<'a, T: ContainerType + ?Sized>(
     resolve_container_inner(ctx, root, false).await
 }
 
-fn insert_value(target: &mut BTreeMap<Name, Value>, name: Name, value: Value) {
+pub(crate) fn create_value_object(values: Vec<(Name, Value)>) -> Value {
+    let mut map = IndexMap::new();
+    for (name, value) in values {
+        insert_value(&mut map, name, value);
+    }
+    Value::Object(map)
+}
+
+fn insert_value(target: &mut IndexMap<Name, Value>, name: Name, value: Value) {
     if let Some(prev_value) = target.get_mut(&name) {
         if let Value::Object(target_map) = prev_value {
             if let Value::Object(obj) = value {
@@ -118,11 +168,7 @@ async fn resolve_container_inner<'a, T: ContainerType + ?Sized>(
         results
     };
 
-    let mut map = BTreeMap::new();
-    for (name, value) in res {
-        insert_value(&mut map, name, value);
-    }
-    Ok(Value::Object(map))
+    Ok(create_value_object(res))
 }
 
 type BoxFieldFuture<'a> = Pin<Box<dyn Future<Output = ServerResult<(Name, Value)>> + 'a + Send>>;
@@ -131,17 +177,14 @@ type BoxFieldFuture<'a> = Pin<Box<dyn Future<Output = ServerResult<(Name, Value)
 pub struct Fields<'a>(Vec<BoxFieldFuture<'a>>);
 
 impl<'a> Fields<'a> {
-    /// Add another set of fields to this set of fields using the given container.
+    /// Add another set of fields to this set of fields using the given
+    /// container.
     pub fn add_set<T: ContainerType + ?Sized>(
         &mut self,
         ctx: &ContextSelectionSet<'a>,
         root: &'a T,
     ) -> ServerResult<()> {
         for selection in &ctx.item.node.items {
-            if ctx.is_skip(&selection.node.directives())? {
-                continue;
-            }
-
             match &selection.node {
                 Selection::Field(field) => {
                     if field.node.name.node == "__typename" {
@@ -156,24 +199,14 @@ impl<'a> Fields<'a> {
                         continue;
                     }
 
-                    if ctx.is_ifdef(&field.node.directives) {
-                        if let Some(MetaType::Object { fields, .. }) =
-                            ctx.schema_env.registry.types.get(T::type_name().as_ref())
-                        {
-                            if !fields.contains_key(field.node.name.node.as_str()) {
-                                continue;
-                            }
-                        }
-                    }
-
-                    self.0.push(Box::pin({
+                    let resolve_fut = Box::pin({
                         let ctx = ctx.clone();
                         async move {
                             let ctx_field = ctx.with_field(field);
                             let field_name = ctx_field.item.node.response_key().node.clone();
                             let extensions = &ctx.query_env.extensions;
 
-                            if extensions.is_empty() {
+                            if extensions.is_empty() && field.node.directives.is_empty() {
                                 Ok((
                                     field_name,
                                     root.resolve_field(&ctx_field).await?.unwrap_or_default(),
@@ -210,20 +243,62 @@ impl<'a> Fields<'a> {
                                         .alias
                                         .as_ref()
                                         .map(|alias| alias.node.as_str()),
+                                    is_for_introspection: ctx_field.is_for_introspection,
                                 };
 
                                 let resolve_fut = root.resolve_field(&ctx_field);
-                                futures_util::pin_mut!(resolve_fut);
-                                Ok((
-                                    field_name,
-                                    extensions
-                                        .resolve(resolve_info, &mut resolve_fut)
-                                        .await?
-                                        .unwrap_or_default(),
-                                ))
+
+                                if field.node.directives.is_empty() {
+                                    futures_util::pin_mut!(resolve_fut);
+                                    Ok((
+                                        field_name,
+                                        extensions
+                                            .resolve(resolve_info, &mut resolve_fut)
+                                            .await?
+                                            .unwrap_or_default(),
+                                    ))
+                                } else {
+                                    let mut resolve_fut = resolve_fut.boxed();
+
+                                    for directive in &field.node.directives {
+                                        if let Some(directive_factory) = ctx
+                                            .schema_env
+                                            .custom_directives
+                                            .get(directive.node.name.node.as_str())
+                                        {
+                                            let ctx_directive = ContextBase {
+                                                path_node: ctx_field.path_node,
+                                                is_for_introspection: false,
+                                                item: directive,
+                                                schema_env: ctx_field.schema_env,
+                                                query_env: ctx_field.query_env,
+                                            };
+                                            let directive_instance = directive_factory
+                                                .create(&ctx_directive, &directive.node)?;
+                                            resolve_fut = Box::pin({
+                                                let ctx_field = ctx_field.clone();
+                                                async move {
+                                                    directive_instance
+                                                        .resolve_field(&ctx_field, &mut resolve_fut)
+                                                        .await
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    Ok((
+                                        field_name,
+                                        extensions
+                                            .resolve(resolve_info, &mut resolve_fut)
+                                            .await?
+                                            .unwrap_or_default(),
+                                    ))
+                                }
                             }
                         }
-                    }));
+                    });
+
+                    self.0.push(resolve_fut);
                 }
                 selection => {
                     let (type_condition, selection_set) = match selection {

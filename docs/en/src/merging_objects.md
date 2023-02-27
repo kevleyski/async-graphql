@@ -2,7 +2,7 @@
 
 Usually we can create multiple implementations for the same type in Rust, but due to the limitation of procedural macros, we can not create multiple Object implementations for the same type. For example, the following code will fail to compile.
 
-```rust
+```rust,ignore,does_not_compile
 #[Object]
 impl Query {
     async fn users(&self) -> Vec<User> {
@@ -25,12 +25,24 @@ Instead, the `#[derive(MergedObject)]` macro allows you to split an object's res
 **Note:** This works for queries and mutations. For subscriptions, see "Merging Subscriptions" below.
 
 ```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+# #[derive(SimpleObject)]
+# struct User { a: i32 }
+# #[derive(SimpleObject)]
+# struct Movie { a: i32 }
+#[derive(Default)]
+struct UserQuery;
+
 #[Object]
 impl UserQuery {
     async fn users(&self) -> Vec<User> {
         todo!()
     }
 }
+
+#[derive(Default)]
+struct MovieQuery;
 
 #[Object]
 impl MovieQuery {
@@ -49,7 +61,7 @@ let schema = Schema::new(
 );
 ```
 
-> ⚠️ **MergedObject cannot be used in Interface。**
+> ⚠️ **MergedObject cannot be used in Interface.**
 
 # Merging Subscriptions
 
@@ -60,13 +72,18 @@ Like merging Objects, each subscription block requires a unique name.
 Example:
 
 ```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+# use futures_util::stream::{Stream};
+# #[derive(Default,SimpleObject)]
+# struct Query { a: i32 }
 #[derive(Default)]
 struct Subscription1;
 
 #[Subscription]
 impl Subscription1 {
     async fn events1(&self) -> impl Stream<Item = i32> {
-        futures::stream::iter(0..10)
+        futures_util::stream::iter(0..10)
     }
 }
 
@@ -76,7 +93,7 @@ struct Subscription2;
 #[Subscription]
 impl Subscription2 {
     async fn events2(&self) -> impl Stream<Item = i32> {
-        futures::stream::iter(10..20)
+        futures_util::stream::iter(10..20)
     }
 }
 

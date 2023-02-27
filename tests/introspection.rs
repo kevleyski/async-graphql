@@ -1,4 +1,7 @@
+#![allow(clippy::uninlined_format_args)]
+
 use async_graphql::*;
+use chrono::{NaiveDate, NaiveDateTime};
 use futures_util::stream::{self, Stream};
 
 #[derive(Clone, Debug)]
@@ -1271,4 +1274,242 @@ pub async fn test_disable_introspection() {
             .data,
         value!({ "__type": null })
     );
+}
+
+#[tokio::test]
+pub async fn test_introspection_only() {
+    let schema = Schema::build(Query, Mutation, EmptySubscription)
+        .introspection_only()
+        .finish();
+
+    // Test whether introspection works.
+    let query = r#"
+        {
+            __type(name: "Mutation") {
+                name
+                kind
+                description
+                fields {
+                    description
+                    name
+                    type { kind name }
+                    args { name }
+                }
+            }
+        }
+    "#;
+    let res_json = value!({
+        "__type": {
+            "name": "Mutation",
+            "kind": "OBJECT",
+            "description": "Global mutation",
+            "fields": [
+              {
+                "description": "simple_mutation description\nline2\nline3",
+                "name": "simpleMutation",
+                "type": {
+                  "kind": "NON_NULL",
+                  "name": null
+                },
+                "args": [
+                  {
+                    "name": "input"
+                  }
+                ]
+              }
+            ]
+        }
+    });
+    let res = schema.execute(query).await.into_result().unwrap().data;
+    assert_eq!(res, res_json);
+
+    // Test whether introspection works.
+    let query = r#"
+        {
+            __type(name: "Query") {
+                name
+                kind
+                description
+                fields {
+                    description
+                    name
+                    type { kind name }
+                    args { name }
+                }
+            }
+        }
+    "#;
+    let res_json = value!({
+      "__type": {
+        "name": "Query",
+        "kind": "OBJECT",
+        "description": "Global query",
+        "fields": [
+          {
+            "description": "Get a simple object",
+            "name": "simpleObject",
+            "type": { "kind": "NON_NULL", "name": null },
+            "args": []
+          }
+        ]
+      }
+    });
+    let res = schema.execute(query).await.into_result().unwrap().data;
+    assert_eq!(res, res_json);
+
+    // Queries shouldn't work in introspection only mode.
+    let query = r#"
+        {
+            simpleObject {
+                a
+            }
+        }
+    "#;
+    let res_json = value!({ "simpleObject": null });
+    let res = schema.execute(query).await.into_result().unwrap().data;
+    assert_eq!(res, res_json);
+
+    // Mutations shouldn't work in introspection only mode.
+    let query = r#"
+        mutation {
+            simpleMutation(input: { a: "" }) {
+                a
+            }
+        }
+    "#;
+    let res_json = value!({ "simpleMutation": null });
+    let res = schema.execute(query).await.into_result().unwrap().data;
+    assert_eq!(res, res_json);
+}
+
+#[tokio::test]
+pub async fn test_introspection_default() {
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    pub struct MyStruct {
+        a: i32,
+        b: i32,
+    }
+
+    #[derive(InputObject)]
+    pub struct DefaultInput {
+        #[graphql(default)]
+        pub str: String,
+        #[graphql(default_with = "NaiveDate::from_ymd(2016, 7, 8).and_hms(9, 10, 11)")]
+        pub date: NaiveDateTime,
+        // a required json with no default
+        pub json: serde_json::Value,
+        // basic default (JSON null)
+        #[graphql(default)]
+        pub json_def: serde_json::Value,
+        // complex default (JSON object)
+        #[graphql(default_with = "serde_json::Value::Object(Default::default())")]
+        pub json_def_obj: serde_json::Value,
+        #[graphql(default)]
+        pub json_def_struct: Json<MyStruct>,
+    }
+
+    struct LocalMutation;
+
+    #[Object]
+    #[allow(unreachable_code)]
+    impl LocalMutation {
+        async fn simple_mutation(&self, _input: DefaultInput) -> SimpleObject {
+            unimplemented!()
+        }
+    }
+
+    let schema = Schema::build(Query, LocalMutation, EmptySubscription)
+        .introspection_only()
+        .finish();
+
+    // Test whether introspection works.
+    let query = r#"
+        {
+            __type(name: "DefaultInput") {
+                name
+                kind
+                inputFields {
+                    name
+                    defaultValue
+                    type { kind ofType { kind name } }
+                }
+            }
+        }
+    "#;
+    let res_json = value!({
+        "__type": {
+            "name": "DefaultInput",
+            "kind": "INPUT_OBJECT",
+            "inputFields": [
+              {
+                "name": "str",
+                "defaultValue": "\"\"",
+                "type": {
+                  "kind": "NON_NULL",
+                  "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String"
+                  },
+                },
+              },
+              {
+                "name": "date",
+                "defaultValue": "\"2016-07-08T09:10:11\"",
+                "type": {
+                  "kind": "NON_NULL",
+                  "ofType": {
+                      "kind": "SCALAR",
+                      "name": "NaiveDateTime"
+                  },
+                },
+              },
+              {
+                "name": "json",
+                "defaultValue": null,
+                "type": {
+                  "kind": "NON_NULL",
+                  "ofType": {
+                      "kind": "SCALAR",
+                      "name": "JSON"
+                  },
+                },
+              },
+              {
+                "name": "jsonDef",
+                "defaultValue": "\"null\"",
+                "type": {
+                  "kind": "NON_NULL",
+                  "ofType": {
+                      "kind": "SCALAR",
+                      "name": "JSON"
+                  },
+                },
+              },
+              {
+                "name": "jsonDefObj",
+                "defaultValue": "\"{}\"",
+                "type": {
+                  "kind": "NON_NULL",
+                  "ofType": {
+                      "kind": "SCALAR",
+                      "name": "JSON"
+                  },
+                },
+              },
+              {
+                "name": "jsonDefStruct",
+                "defaultValue": "\"{\\\"a\\\":0,\\\"b\\\":0}\"",
+                "type": {
+                  "kind": "NON_NULL",
+                  "ofType": {
+                      "kind": "SCALAR",
+                      "name": "JSON"
+                  },
+                },
+              },
+            ]
+        }
+    });
+    let res = schema.execute(query).await.into_result().unwrap().data;
+    assert_eq!(res, res_json);
 }

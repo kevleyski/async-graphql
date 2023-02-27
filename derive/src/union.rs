@@ -1,13 +1,14 @@
+use std::collections::HashSet;
+
 use darling::ast::{Data, Style};
 use proc_macro::TokenStream;
-use proc_macro2::{Ident, Span};
 use quote::quote;
-use std::collections::HashSet;
-use syn::visit_mut::VisitMut;
-use syn::{visit_mut, Error, Lifetime, Type};
+use syn::{visit_mut::VisitMut, Error, Type};
 
-use crate::args::{self, RenameTarget};
-use crate::utils::{get_crate_name, get_rustdoc, visible_fn, GeneratorResult};
+use crate::{
+    args::{self, RenameTarget},
+    utils::{get_crate_name, get_rustdoc, visible_fn, GeneratorResult, RemoveLifetime},
+};
 
 pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_name(union_args.internal);
@@ -15,20 +16,29 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
     let (impl_generics, ty_generics, where_clause) = union_args.generics.split_for_impl();
     let s = match &union_args.data {
         Data::Enum(s) => s,
-        _ => {
-            return Err(Error::new_spanned(&ident, "Union can only be applied to an enum.").into())
-        }
+        _ => return Err(Error::new_spanned(ident, "Union can only be applied to an enum.").into()),
     };
     let mut enum_names = Vec::new();
     let mut enum_items = HashSet::new();
     let mut type_into_impls = Vec::new();
-    let gql_typename = union_args
-        .name
-        .clone()
-        .unwrap_or_else(|| RenameTarget::Type.rename(ident.to_string()));
+    let gql_typename = if !union_args.name_type {
+        let name = union_args
+            .name
+            .clone()
+            .unwrap_or_else(|| RenameTarget::Type.rename(ident.to_string()));
+        quote!(::std::borrow::Cow::Borrowed(#name))
+    } else {
+        quote!(<Self as #crate_name::TypeName>::type_name())
+    };
 
+    let inaccessible = union_args.inaccessible;
+    let tags = union_args
+        .tags
+        .iter()
+        .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
+        .collect::<Vec<_>>();
     let desc = get_rustdoc(&union_args.attrs)?
-        .map(|s| quote! { ::std::option::Option::Some(#s) })
+        .map(|s| quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#s)) })
         .unwrap_or_else(|| quote! {::std::option::Option::None});
 
     let mut registry_types = Vec::new();
@@ -61,34 +71,31 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
             }
         };
 
-        if let Type::Path(p) = &ty {
+        let mut ty = ty;
+        while let Type::Group(group) = ty {
+            ty = &*group.elem;
+        }
+
+        if matches!(ty, Type::Path(_) | Type::Macro(_)) {
             // This validates that the field type wasn't already used
-            if !enum_items.insert(p) {
+            if !enum_items.insert(ty) {
                 return Err(
-                    Error::new_spanned(&ty, "This type already used in another variant").into(),
+                    Error::new_spanned(ty, "This type is already used in another variant").into(),
                 );
             }
 
             enum_names.push(enum_name);
 
-            struct RemoveLifetime;
-            impl VisitMut for RemoveLifetime {
-                fn visit_lifetime_mut(&mut self, i: &mut Lifetime) {
-                    i.ident = Ident::new("_", Span::call_site());
-                    visit_mut::visit_lifetime_mut(self, i);
-                }
-            }
-
-            let mut assert_ty = p.clone();
-            RemoveLifetime.visit_type_path_mut(&mut assert_ty);
+            let mut assert_ty = ty.clone();
+            RemoveLifetime.visit_type_mut(&mut assert_ty);
 
             if !variant.flatten {
                 type_into_impls.push(quote! {
                     #crate_name::static_assertions::assert_impl_one!(#assert_ty: #crate_name::ObjectType);
 
                     #[allow(clippy::all, clippy::pedantic)]
-                    impl #impl_generics ::std::convert::From<#p> for #ident #ty_generics #where_clause {
-                        fn from(obj: #p) -> Self {
+                    impl #impl_generics ::std::convert::From<#ty> for #ident #ty_generics #where_clause {
+                        fn from(obj: #ty) -> Self {
                             #ident::#enum_name(obj)
                         }
                     }
@@ -98,8 +105,8 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
                     #crate_name::static_assertions::assert_impl_one!(#assert_ty: #crate_name::UnionType);
 
                     #[allow(clippy::all, clippy::pedantic)]
-                    impl #impl_generics ::std::convert::From<#p> for #ident #ty_generics #where_clause {
-                        fn from(obj: #p) -> Self {
+                    impl #impl_generics ::std::convert::From<#ty> for #ident #ty_generics #where_clause {
+                        fn from(obj: #ty) -> Self {
                             #ident::#enum_name(obj)
                         }
                     }
@@ -108,15 +115,15 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
 
             if !variant.flatten {
                 registry_types.push(quote! {
-                    <#p as #crate_name::Type>::create_type_info(registry);
+                    <#ty as #crate_name::OutputType>::create_type_info(registry);
                 });
                 possible_types.push(quote! {
-                    possible_types.insert(<#p as #crate_name::Type>::type_name().into_owned());
+                    possible_types.insert(<#ty as #crate_name::OutputType>::type_name().into_owned());
                 });
             } else {
                 possible_types.push(quote! {
                     if let #crate_name::registry::MetaType::Union { possible_types: possible_types2, .. } =
-                        registry.create_dummy_type::<#p>() {
+                        registry.create_fake_output_type::<#ty>() {
                         possible_types.extend(possible_types2);
                     }
                 });
@@ -124,11 +131,11 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
 
             if !variant.flatten {
                 get_introspection_typename.push(quote! {
-                    #ident::#enum_name(obj) => <#p as #crate_name::Type>::type_name()
+                    #ident::#enum_name(obj) => <#ty as #crate_name::OutputType>::type_name()
                 });
             } else {
                 get_introspection_typename.push(quote! {
-                    #ident::#enum_name(obj) => <#p as #crate_name::Type>::introspection_type_name(obj)
+                    #ident::#enum_name(obj) => <#ty as #crate_name::OutputType>::introspection_type_name(obj)
                 });
             }
 
@@ -142,7 +149,7 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
 
     if possible_types.is_empty() {
         return Err(Error::new_spanned(
-            &ident,
+            ident,
             "A GraphQL Union type must include one or more unique member types.",
         )
         .into());
@@ -151,36 +158,6 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
     let visible = visible_fn(&union_args.visible);
     let expanded = quote! {
         #(#type_into_impls)*
-
-        #[allow(clippy::all, clippy::pedantic)]
-        impl #impl_generics #crate_name::Type for #ident #ty_generics #where_clause {
-            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
-               ::std::borrow::Cow::Borrowed(#gql_typename)
-            }
-
-            fn introspection_type_name(&self) -> ::std::borrow::Cow<'static, ::std::primitive::str> {
-                match self {
-                    #(#get_introspection_typename),*
-                }
-            }
-
-            fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
-                registry.create_type::<Self, _>(|registry| {
-                    #(#registry_types)*
-
-                    #crate_name::registry::MetaType::Union {
-                        name: ::std::borrow::ToOwned::to_owned(#gql_typename),
-                        description: #desc,
-                        possible_types: {
-                            let mut possible_types = #crate_name::indexmap::IndexSet::new();
-                            #(#possible_types)*
-                            possible_types
-                        },
-                        visible: #visible,
-                    }
-                })
-            }
-        }
 
         #[allow(clippy::all, clippy::pedantic)]
         #[#crate_name::async_trait::async_trait]
@@ -200,6 +177,36 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
         #[allow(clippy::all, clippy::pedantic)]
         #[#crate_name::async_trait::async_trait]
         impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
+            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+               #gql_typename
+            }
+
+            fn introspection_type_name(&self) -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                match self {
+                    #(#get_introspection_typename),*
+                }
+            }
+
+            fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
+                registry.create_output_type::<Self, _>(#crate_name::registry::MetaTypeId::Union, |registry| {
+                    #(#registry_types)*
+
+                    #crate_name::registry::MetaType::Union {
+                        name: ::std::borrow::Cow::into_owned(#gql_typename),
+                        description: #desc,
+                        possible_types: {
+                            let mut possible_types = #crate_name::indexmap::IndexSet::new();
+                            #(#possible_types)*
+                            possible_types
+                        },
+                        visible: #visible,
+                        inaccessible: #inaccessible,
+                        tags: ::std::vec![ #(#tags),* ],
+                        rust_typename: ::std::option::Option::Some(::std::any::type_name::<Self>()),
+                    }
+                })
+            }
+
             async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
                 #crate_name::resolver_utils::resolve_container(ctx, self).await
             }
@@ -207,5 +214,6 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
 
         impl #impl_generics #crate_name::UnionType for #ident #ty_generics #where_clause {}
     };
+
     Ok(expanded.into())
 }

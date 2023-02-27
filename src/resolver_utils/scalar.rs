@@ -33,7 +33,8 @@ pub trait ScalarType: Sized + Send {
 
     /// Checks for a valid scalar value.
     ///
-    /// Implementing this function can find incorrect input values during the verification phase, which can improve performance.
+    /// Implementing this function can find incorrect input values during the
+    /// verification phase, which can improve performance.
     fn is_valid(_value: &Value) -> bool {
         true
     }
@@ -44,8 +45,11 @@ pub trait ScalarType: Sized + Send {
 
 /// Define a scalar
 ///
-/// If your type implemented `serde::Serialize` and `serde::Deserialize`, then you can use this macro to define a scalar more simply.
-/// It helps you implement the `ScalarType::parse` and `ScalarType::to_value` functions by calling the [from_value](fn.from_value.html) and [to_value](fn.to_value.html) functions.
+/// If your type implemented `serde::Serialize` and `serde::Deserialize`, then
+/// you can use this macro to define a scalar more simply. It helps you
+/// implement the `ScalarType::parse` and `ScalarType::to_value` functions by
+/// calling the [from_value](fn.from_value.html) and
+/// [to_value](fn.to_value.html) functions.
 ///
 /// # Examples
 ///
@@ -68,6 +72,9 @@ pub trait ScalarType: Sized + Send {
 /// // Rename to `MV` and add description.
 /// // scalar!(MyValue, "MV", "This is my value");
 ///
+/// // Rename to `MV`, add description and specifiedByURL.
+/// // scalar!(MyValue, "MV", "This is my value", "https://tools.ietf.org/html/rfc4122");
+///
 /// struct Query;
 ///
 /// #[Object]
@@ -77,55 +84,60 @@ pub trait ScalarType: Sized + Send {
 ///     }
 /// }
 ///
-/// tokio::runtime::Runtime::new().unwrap().block_on(async move {
-///     let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
-///     let res = schema.execute(r#"{ value(input: {a: 10, b: {v1: 1, v2: 2} }) }"#).await.into_result().unwrap().data;
-///     assert_eq!(res, value!({
-///         "value": {
-///             "a": 10,
-///             "b": {"v1": 1, "v2": 2},
-///         }
-///     }));
-/// });
-///
-///
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async move {
+/// let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+/// let res = schema.execute(r#"{ value(input: {a: 10, b: {v1: 1, v2: 2} }) }"#).await.into_result().unwrap().data;
+/// assert_eq!(res, value!({
+///     "value": {
+///         "a": 10,
+///         "b": {"v1": 1, "v2": 2},
+///     }
+/// }));
+/// # });
 /// ```
 #[macro_export]
 macro_rules! scalar {
+    ($ty:ty, $name:literal, $desc:literal, $specified_by_url:literal) => {
+        $crate::scalar_internal!(
+            $ty,
+            $name,
+            ::std::option::Option::Some(::std::string::ToString::to_string($desc)),
+            ::std::option::Option::Some(::std::string::ToString::to_string($specified_by_url))
+        );
+    };
+
     ($ty:ty, $name:literal, $desc:literal) => {
-        $crate::scalar_internal!($ty, $name, ::std::option::Option::Some($desc));
+        $crate::scalar_internal!(
+            $ty,
+            $name,
+            ::std::option::Option::Some(::std::string::ToString::to_string($desc)),
+            ::std::option::Option::None
+        );
     };
 
     ($ty:ty, $name:literal) => {
-        $crate::scalar_internal!($ty, $name, ::std::option::Option::None);
+        $crate::scalar_internal!(
+            $ty,
+            $name,
+            ::std::option::Option::None,
+            ::std::option::Option::None
+        );
     };
 
     ($ty:ty) => {
-        $crate::scalar_internal!($ty, ::std::stringify!($ty), ::std::option::Option::None);
+        $crate::scalar_internal!(
+            $ty,
+            ::std::stringify!($ty),
+            ::std::option::Option::None,
+            ::std::option::Option::None
+        );
     };
 }
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! scalar_internal {
-    ($ty:ty, $name:expr, $desc:expr) => {
-        impl $crate::Type for $ty {
-            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
-                ::std::borrow::Cow::Borrowed($name)
-            }
-
-            fn create_type_info(
-                registry: &mut $crate::registry::Registry,
-            ) -> ::std::string::String {
-                registry.create_type::<$ty, _>(|_| $crate::registry::MetaType::Scalar {
-                    name: ::std::borrow::ToOwned::to_owned($name),
-                    description: $desc,
-                    is_valid: |value| <$ty as $crate::ScalarType>::is_valid(value),
-                    visible: ::std::option::Option::None,
-                })
-            }
-        }
-
+    ($ty:ty, $name:expr, $desc:expr, $specified_by_url:expr) => {
         impl $crate::ScalarType for $ty {
             fn parse(value: $crate::Value) -> $crate::InputValueResult<Self> {
                 ::std::result::Result::Ok($crate::from_value(value)?)
@@ -137,6 +149,30 @@ macro_rules! scalar_internal {
         }
 
         impl $crate::InputType for $ty {
+            type RawValueType = Self;
+
+            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                ::std::borrow::Cow::Borrowed($name)
+            }
+
+            fn create_type_info(
+                registry: &mut $crate::registry::Registry,
+            ) -> ::std::string::String {
+                registry.create_input_type::<$ty, _>($crate::registry::MetaTypeId::Scalar, |_| {
+                    $crate::registry::MetaType::Scalar {
+                        name: ::std::borrow::ToOwned::to_owned($name),
+                        description: $desc,
+                        is_valid: ::std::option::Option::Some(::std::sync::Arc::new(|value| {
+                            <$ty as $crate::ScalarType>::is_valid(value)
+                        })),
+                        visible: ::std::option::Option::None,
+                        inaccessible: false,
+                        tags: ::std::default::Default::default(),
+                        specified_by_url: $specified_by_url,
+                    }
+                })
+            }
+
             fn parse(
                 value: ::std::option::Option<$crate::Value>,
             ) -> $crate::InputValueResult<Self> {
@@ -146,10 +182,36 @@ macro_rules! scalar_internal {
             fn to_value(&self) -> $crate::Value {
                 <$ty as $crate::ScalarType>::to_value(self)
             }
+
+            fn as_raw_value(&self) -> ::std::option::Option<&Self::RawValueType> {
+                ::std::option::Option::Some(self)
+            }
         }
 
         #[$crate::async_trait::async_trait]
         impl $crate::OutputType for $ty {
+            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                ::std::borrow::Cow::Borrowed($name)
+            }
+
+            fn create_type_info(
+                registry: &mut $crate::registry::Registry,
+            ) -> ::std::string::String {
+                registry.create_output_type::<$ty, _>($crate::registry::MetaTypeId::Scalar, |_| {
+                    $crate::registry::MetaType::Scalar {
+                        name: ::std::borrow::ToOwned::to_owned($name),
+                        description: $desc,
+                        is_valid: ::std::option::Option::Some(::std::sync::Arc::new(|value| {
+                            <$ty as $crate::ScalarType>::is_valid(value)
+                        })),
+                        visible: ::std::option::Option::None,
+                        inaccessible: false,
+                        tags: ::std::default::Default::default(),
+                        specified_by_url: $specified_by_url,
+                    }
+                })
+            }
+
             async fn resolve(
                 &self,
                 _: &$crate::ContextSelectionSet<'_>,

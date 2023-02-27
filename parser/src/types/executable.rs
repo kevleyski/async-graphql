@@ -1,12 +1,14 @@
 //! Executable document-related GraphQL types.
 
-use super::*;
 use async_graphql_value::{ConstValue, Name, Value};
+use serde::{Deserialize, Serialize};
+
+use super::*;
 
 /// An executable GraphQL file or request string.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#ExecutableDocument).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#ExecutableDocument).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutableDocument {
     /// The operations of the document.
     pub operations: DocumentOperations,
@@ -17,7 +19,7 @@ pub struct ExecutableDocument {
 /// The operations of a GraphQL document.
 ///
 /// There is either one anonymous operation or many named operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DocumentOperations {
     /// The document contains a single anonymous operation.
     Single(Positioned<OperationDefinition>),
@@ -36,10 +38,10 @@ impl DocumentOperations {
     }
 }
 
-// TODO: This is not implemented as I would like to later implement IntoIterator for
-// DocumentOperations (not a reference) without having a breaking change.
+// TODO: This is not implemented as I would like to later implement IntoIterator
+// for DocumentOperations (not a reference) without having a breaking change.
 //
-//impl<'a> IntoIterator for &'a DocumentOperations {
+// impl<'a> IntoIterator for &'a DocumentOperations {
 //    type Item = &'a Positioned<OperationDefinition>;
 //    type IntoIter = OperationsIter<'a>;
 //
@@ -73,13 +75,7 @@ impl<'a> std::iter::FusedIterator for OperationsIter<'a> {}
 impl<'a> ExactSizeIterator for OperationsIter<'a> {
     fn len(&self) -> usize {
         match &self.0 {
-            OperationsIterInner::Single(opt) => {
-                if opt.is_some() {
-                    1
-                } else {
-                    0
-                }
-            }
+            OperationsIterInner::Single(opt) => usize::from(opt.is_some()),
             OperationsIterInner::Multiple(iter) => iter.len(),
         }
     }
@@ -91,10 +87,11 @@ enum OperationsIterInner<'a> {
     Multiple(hash_map::Iter<'a, Name, Positioned<OperationDefinition>>),
 }
 
-/// A GraphQL operation, such as `mutation($content:String!) { makePost(content: $content) { id } }`.
+/// A GraphQL operation, such as `mutation($content:String!) { makePost(content:
+/// $content) { id } }`.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#OperationDefinition).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#OperationDefinition).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationDefinition {
     /// The type of operation.
     pub ty: OperationType,
@@ -106,52 +103,54 @@ pub struct OperationDefinition {
     pub selection_set: Positioned<SelectionSet>,
 }
 
-/// A variable definition inside a list of variable definitions, for example `$name:String!`.
+/// A variable definition inside a list of variable definitions, for example
+/// `$name:String!`.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#VariableDefinition).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#VariableDefinition).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariableDefinition {
     /// The name of the variable, without the preceding `$`.
     pub name: Positioned<Name>,
     /// The type of the variable.
     pub var_type: Positioned<Type>,
+    /// The variable's directives.
+    pub directives: Vec<Positioned<Directive>>,
     /// The optional default value of the variable.
     pub default_value: Option<Positioned<ConstValue>>,
 }
 
 impl VariableDefinition {
-    /// Get the default value of the variable; this is `default_value` if it is present,
-    /// `Value::Null` if it is nullable and `None` otherwise.
+    /// Get the default value of the variable; this is `default_value` if it is
+    /// present, `Value::Null` if it is nullable and `None` otherwise.
     #[must_use]
     pub fn default_value(&self) -> Option<&ConstValue> {
-        self.default_value
-            .as_ref()
-            .map(|value| &value.node)
-            .or_else(|| {
-                if self.var_type.node.nullable {
-                    Some(&ConstValue::Null)
-                } else {
-                    None
-                }
-            })
+        self.default_value.as_ref().map(|value| &value.node).or({
+            if self.var_type.node.nullable {
+                Some(&ConstValue::Null)
+            } else {
+                None
+            }
+        })
     }
 }
 
 /// A set of fields to be selected, for example `{ name age }`.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#SelectionSet).
-#[derive(Debug, Default, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#SelectionSet).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SelectionSet {
     /// The fields to be selected.
     pub items: Vec<Positioned<Selection>>,
 }
 
-/// A part of an object to be selected; a single field, a fragment spread or an inline fragment.
+/// A part of an object to be selected; a single field, a fragment spread or an
+/// inline fragment.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#Selection).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#Selection).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Selection {
-    /// Select a single field, such as `name` or `weightKilos: weight(unit: KILOGRAMS)`.
+    /// Select a single field, such as `name` or `weightKilos: weight(unit:
+    /// KILOGRAMS)`.
     Field(Positioned<Field>),
     /// Select using a fragment.
     FragmentSpread(Positioned<FragmentSpread>),
@@ -180,10 +179,11 @@ impl Selection {
     }
 }
 
-/// A field being selected on an object, such as `name` or `weightKilos: weight(unit: KILOGRAMS)`.
+/// A field being selected on an object, such as `name` or `weightKilos:
+/// weight(unit: KILOGRAMS)`.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#Field).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#Field).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Field {
     /// The optional field alias.
     pub alias: Option<Positioned<Name>>,
@@ -193,13 +193,14 @@ pub struct Field {
     pub arguments: Vec<(Positioned<Name>, Positioned<Value>)>,
     /// The directives in the field selector.
     pub directives: Vec<Positioned<Directive>>,
-    /// The subfields being selected in this field, if it is an object. Empty if no fields are
-    /// being selected.
+    /// The subfields being selected in this field, if it is an object. Empty if
+    /// no fields are being selected.
     pub selection_set: Positioned<SelectionSet>,
 }
 
 impl Field {
-    /// Get the response key of the field. This is the alias if present and the name otherwise.
+    /// Get the response key of the field. This is the alias if present and the
+    /// name otherwise.
     #[must_use]
     pub fn response_key(&self) -> &Positioned<Name> {
         self.alias.as_ref().unwrap_or(&self.name)
@@ -217,8 +218,8 @@ impl Field {
 
 /// A fragment selector, such as `... userFields`.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#FragmentSpread).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#FragmentSpread).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FragmentSpread {
     /// The name of the fragment being selected.
     pub fragment_name: Positioned<Name>,
@@ -228,8 +229,8 @@ pub struct FragmentSpread {
 
 /// An inline fragment selector, such as `... on User { name }`.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#InlineFragment).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#InlineFragment).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InlineFragment {
     /// The type condition.
     pub type_condition: Option<Positioned<TypeCondition>>,
@@ -239,10 +240,11 @@ pub struct InlineFragment {
     pub selection_set: Positioned<SelectionSet>,
 }
 
-/// The definition of a fragment, such as `fragment userFields on User { name age }`.
+/// The definition of a fragment, such as `fragment userFields on User { name
+/// age }`.
 ///
-/// [Reference](https://spec.graphql.org/June2018/#FragmentDefinition).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#FragmentDefinition).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FragmentDefinition {
     /// The type this fragment operates on.
     pub type_condition: Positioned<TypeCondition>,
@@ -254,8 +256,8 @@ pub struct FragmentDefinition {
 
 /// A type a fragment can apply to (`on` followed by the type).
 ///
-/// [Reference](https://spec.graphql.org/June2018/#TypeCondition).
-#[derive(Debug, Clone)]
+/// [Reference](https://spec.graphql.org/October2021/#TypeCondition).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeCondition {
     /// The type this fragment applies to.
     pub on: Positioned<Name>,

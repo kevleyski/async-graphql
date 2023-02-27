@@ -1,13 +1,15 @@
-use std::collections::BTreeMap;
 use std::{fmt, vec};
 
-use crate::{ConstValue, Name};
-
-use serde::de::{
-    self, Deserialize, DeserializeOwned, DeserializeSeed, EnumAccess, Error as DeError,
-    IntoDeserializer, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor,
+use indexmap::IndexMap;
+use serde::{
+    de::{
+        self, Deserialize, DeserializeOwned, DeserializeSeed, EnumAccess, Error as DeError,
+        IntoDeserializer, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor,
+    },
+    forward_to_deserialize_any,
 };
-use serde::forward_to_deserialize_any;
+
+use crate::{ConstValue, Name};
 
 /// This type represents errors that can occur when deserializing.
 #[derive(Debug)]
@@ -78,7 +80,7 @@ where
 }
 
 fn visit_object<'de, V>(
-    object: BTreeMap<Name, ConstValue>,
+    object: IndexMap<Name, ConstValue>,
     visitor: V,
 ) -> Result<V::Value, DeserializerError>
 where
@@ -113,7 +115,7 @@ impl<'de> de::Deserializer<'de> for ConstValue {
                 .map_err(|err| DeserializerError(err.to_string())),
             ConstValue::String(v) => visitor.visit_str(&v),
             ConstValue::Boolean(v) => visitor.visit_bool(v),
-            ConstValue::Binary(bytes) => visitor.visit_bytes(&*bytes),
+            ConstValue::Binary(bytes) => visitor.visit_bytes(&bytes),
             ConstValue::Enum(v) => visitor.visit_str(v.as_str()),
             ConstValue::List(v) => visit_array(v, visitor),
             ConstValue::Object(v) => visit_object(v, visitor),
@@ -179,7 +181,7 @@ impl<'de> de::Deserializer<'de> for ConstValue {
                 }
                 (variant, Some(value))
             }
-            ConstValue::String(variant) => (Name::new(&variant), None),
+            ConstValue::String(variant) => (Name::new(variant), None),
             ConstValue::Enum(variant) => (variant, None),
             other => {
                 return Err(DeserializerError::invalid_type(
@@ -194,7 +196,7 @@ impl<'de> de::Deserializer<'de> for ConstValue {
 
     #[inline]
     fn is_human_readable(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -365,13 +367,13 @@ impl<'de> SeqAccess<'de> for SeqDeserializer {
 }
 
 struct MapDeserializer {
-    iter: <BTreeMap<Name, ConstValue> as IntoIterator>::IntoIter,
+    iter: <IndexMap<Name, ConstValue> as IntoIterator>::IntoIter,
     value: Option<ConstValue>,
 }
 
 impl MapDeserializer {
     #[inline]
-    fn new(map: BTreeMap<Name, ConstValue>) -> Self {
+    fn new(map: IndexMap<Name, ConstValue>) -> Self {
         MapDeserializer {
             iter: map.into_iter(),
             value: None,

@@ -1,12 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::parser::types::{
-    ExecutableDocument, FragmentDefinition, FragmentSpread, OperationDefinition, VariableDefinition,
-};
-use crate::validation::utils::{referenced_variables, Scope};
-use crate::validation::visitor::{Visitor, VisitorContext};
-use crate::{Name, Pos, Positioned};
 use async_graphql_value::Value;
+
+use crate::{
+    parser::types::{
+        ExecutableDocument, FragmentDefinition, FragmentSpread, OperationDefinition,
+        VariableDefinition,
+    },
+    validation::{
+        utils::{referenced_variables, Scope},
+        visitor::{Visitor, VisitorContext},
+    },
+    Name, Pos, Positioned,
+};
 
 #[derive(Default)]
 pub struct NoUndefinedVariables<'a> {
@@ -48,7 +54,7 @@ impl<'a> NoUndefinedVariables<'a> {
 
 impl<'a> Visitor<'a> for NoUndefinedVariables<'a> {
     fn exit_document(&mut self, ctx: &mut VisitorContext<'a>, _doc: &'a ExecutableDocument) {
-        for (op_name, &(ref def_pos, ref def_vars)) in &self.defined_variables {
+        for (op_name, (def_pos, def_vars)) in &self.defined_variables {
             let mut undef = Vec::new();
             let mut visited = HashSet::new();
             self.find_undef_vars(

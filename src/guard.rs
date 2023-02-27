@@ -4,13 +4,22 @@ use crate::{Context, Result};
 
 /// Field guard
 ///
-/// Guard is a pre-condition for a field that is resolved if `Ok(())` is returned, otherwise an error is returned.
-///
-/// This trait is defined through the [`async-trait`](https://crates.io/crates/async-trait) macro.
+/// Guard is a pre-condition for a field that is resolved if `Ok(())` is
+/// returned, otherwise an error is returned.
 #[async_trait::async_trait]
 pub trait Guard {
     /// Check whether the guard will allow access to the field.
     async fn check(&self, ctx: &Context<'_>) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<T> Guard for T
+where
+    T: Fn(&Context<'_>) -> Result<()> + Send + Sync + 'static,
+{
+    async fn check(&self, ctx: &Context<'_>) -> Result<()> {
+        self(ctx)
+    }
 }
 
 /// An extension trait for `Guard`.
@@ -45,7 +54,9 @@ pub struct Or<A: Guard, B: Guard>(A, B);
 #[async_trait::async_trait]
 impl<A: Guard + Send + Sync, B: Guard + Send + Sync> Guard for Or<A, B> {
     async fn check(&self, ctx: &Context<'_>) -> Result<()> {
-        let second_result = self.1.check(ctx).await;
-        self.0.check(ctx).await.or(second_result)
+        if self.0.check(ctx).await.is_ok() {
+            return Ok(());
+        }
+        self.1.check(ctx).await
     }
 }

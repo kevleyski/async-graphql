@@ -1,7 +1,9 @@
-use std::convert::TryFrom;
-use std::num::ParseIntError;
-use std::ops::{Deref, DerefMut};
+use std::{
+    num::ParseIntError,
+    ops::{Deref, DerefMut},
+};
 
+use async_graphql_value::ConstValue;
 #[cfg(feature = "bson")]
 use bson::oid::{self, ObjectId};
 use serde::{Deserialize, Serialize};
@@ -10,8 +12,9 @@ use crate::{InputValueError, InputValueResult, Scalar, ScalarType, Value};
 
 /// ID scalar
 ///
-/// The input is a `&str`, `String`, `usize` or `uuid::UUID`, and the output is a string.
-#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
+/// The input is a `&str`, `String`, `usize` or `uuid::UUID`, and the output is
+/// a string.
+#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct ID(pub String);
 
@@ -38,6 +41,12 @@ impl<T: std::fmt::Display> From<T> for ID {
 impl From<ID> for String {
     fn from(id: ID) -> Self {
         id.0
+    }
+}
+
+impl From<ID> for ConstValue {
+    fn from(id: ID) -> Self {
+        ConstValue::String(id.0)
     }
 }
 

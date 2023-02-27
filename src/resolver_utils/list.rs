@@ -1,6 +1,7 @@
-use crate::extensions::ResolveInfo;
-use crate::parser::types::Field;
-use crate::{ContextSelectionSet, OutputType, Positioned, ServerResult, Type, Value};
+use crate::{
+    extensions::ResolveInfo, parser::types::Field, ContextSelectionSet, OutputType, Positioned,
+    ServerResult, Value,
+};
 
 /// Resolve an list by executing each of the items concurrently.
 pub async fn resolve_list<'a, T: OutputType + 'a>(
@@ -25,6 +26,7 @@ pub async fn resolve_list<'a, T: OutputType + 'a>(
                         return_type: &T::qualified_type_name(),
                         name: field.node.name.node.as_str(),
                         alias: field.node.alias.as_ref().map(|alias| alias.node.as_str()),
+                        is_for_introspection: ctx_idx.is_for_introspection,
                     };
                     let resolve_fut = async {
                         OutputType::resolve(&item, &ctx_idx, field)

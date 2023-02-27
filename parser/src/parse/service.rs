@@ -323,6 +323,7 @@ fn parse_directive_definition(
                         "FRAGMENT_DEFINITION" => DirectiveLocation::FragmentDefinition,
                         "FRAGMENT_SPREAD" => DirectiveLocation::FragmentSpread,
                         "INLINE_FRAGMENT" => DirectiveLocation::InlineFragment,
+                        "VARIABLE_DEFINITION" => DirectiveLocation::VariableDefinition,
                         "SCHEMA" => DirectiveLocation::Schema,
                         "SCALAR" => DirectiveLocation::Scalar,
                         "OBJECT" => DirectiveLocation::Object,
@@ -397,13 +398,15 @@ fn parse_input_value_definition(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
 
     #[test]
     fn test_parser() {
         for entry in fs::read_dir("tests/services").unwrap() {
             let entry = entry.unwrap();
+            eprintln!("Parsing file {}", entry.path().display());
             GraphQLParser::parse(
                 Rule::service_document,
                 &fs::read_to_string(entry.path()).unwrap(),

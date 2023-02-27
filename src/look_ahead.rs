@@ -1,31 +1,36 @@
 use std::collections::HashMap;
-use std::convert::TryFrom;
 
-use crate::parser::types::{Field, FragmentDefinition, Selection, SelectionSet};
-use crate::{Name, Positioned, SelectionField};
+use crate::{
+    parser::types::{Field, FragmentDefinition, Selection, SelectionSet},
+    Context, Name, Positioned, SelectionField,
+};
 
 /// A selection performed by a query.
 pub struct Lookahead<'a> {
     fragments: &'a HashMap<Name, Positioned<FragmentDefinition>>,
     fields: Vec<&'a Field>,
+    context: &'a Context<'a>,
 }
 
 impl<'a> Lookahead<'a> {
     pub(crate) fn new(
         fragments: &'a HashMap<Name, Positioned<FragmentDefinition>>,
         field: &'a Field,
+        context: &'a Context<'a>,
     ) -> Self {
         Self {
             fragments,
             fields: vec![field],
+            context,
         }
     }
 
-    /// Get the field of the selection set with the specified name. This will ignore
-    /// aliases.
+    /// Get the field of the selection set with the specified name. This will
+    /// ignore aliases.
     ///
-    /// For example, calling `.field("a")` on `{ a { b } }` will return a lookahead that
-    /// represents `{ b }`.
+    /// For example, calling `.field("a")` on `{ a { b } }` will return a
+    /// lookahead that represents `{ b }`.
+    #[must_use]
     pub fn field(&self, name: &str) -> Self {
         let mut fields = Vec::new();
         for field in &self.fields {
@@ -35,6 +40,7 @@ impl<'a> Lookahead<'a> {
         Self {
             fragments: self.fragments,
             fields,
+            context: self.context,
         }
     }
 
@@ -43,6 +49,22 @@ impl<'a> Lookahead<'a> {
     pub fn exists(&self) -> bool {
         !self.fields.is_empty()
     }
+
+    /// Get the `SelectionField`s for each of the fields covered by this
+    /// `Lookahead`.
+    ///
+    /// There will be multiple fields in situations where the same field is
+    /// queried twice.
+    pub fn selection_fields(&self) -> Vec<SelectionField<'a>> {
+        self.fields
+            .iter()
+            .map(|field| SelectionField {
+                fragments: self.fragments,
+                field,
+                context: self.context,
+            })
+            .collect()
+    }
 }
 
 impl<'a> From<SelectionField<'a>> for Lookahead<'a> {
@@ -50,12 +72,14 @@ impl<'a> From<SelectionField<'a>> for Lookahead<'a> {
         Lookahead {
             fragments: selection_field.fragments,
             fields: vec![selection_field.field],
+            context: selection_field.context,
         }
     }
 }
 
 /// Convert a slice of `SelectionField`s to a `Lookahead`.
-/// Assumes all `SelectionField`s are from the same query and thus have the same fragments.
+/// Assumes all `SelectionField`s are from the same query and thus have the same
+/// fragments.
 ///
 /// Fails if either no `SelectionField`s were provided.
 impl<'a> TryFrom<&[SelectionField<'a>]> for Lookahead<'a> {
@@ -71,6 +95,7 @@ impl<'a> TryFrom<&[SelectionField<'a>]> for Lookahead<'a> {
                     .iter()
                     .map(|selection_field| selection_field.field)
                     .collect(),
+                context: selection_fields[0].context,
             })
         }
     }
@@ -83,8 +108,6 @@ fn filter<'a>(
     name: &str,
 ) {
     for item in &selection_set.items {
-        // doing this imperatively is a bit nasty, but using iterators would
-        // require a boxed return type (I believe) as its recusive
         match &item.node {
             Selection::Field(field) => {
                 if field.node.name.node == name {

@@ -2,14 +2,15 @@ use std::sync::Arc;
 
 use futures_util::lock::Mutex;
 
-use crate::extensions::{
-    Extension, ExtensionContext, ExtensionFactory, NextRequest, NextValidation,
+use crate::{
+    extensions::{Extension, ExtensionContext, ExtensionFactory, NextRequest, NextValidation},
+    value, Response, ServerError, ValidationResult,
 };
-use crate::{value, Response, ServerError, ValidationResult};
 
 /// Analyzer extension
 ///
-/// This extension will output the `analyzer` field containing `complexity` and `depth` in the response extension of each query.
+/// This extension will output the `analyzer` field containing `complexity` and
+/// `depth` in the response extension of each query.
 pub struct Analyzer;
 
 impl ExtensionFactory for Analyzer {
@@ -83,7 +84,7 @@ mod tests {
 
         #[graphql(complexity = "count * child_complexity")]
         async fn objs(&self, count: usize) -> Vec<MyObj> {
-            vec![MyObj; count as usize]
+            vec![MyObj; count]
         }
     }
 

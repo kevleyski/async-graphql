@@ -130,7 +130,7 @@ pub async fn test_multiple_unions() {
     }
 
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
-        .register_type::<UnionA>() // `UnionA` is not directly referenced, so manual registration is required.
+        .register_output_type::<UnionA>() // `UnionA` is not directly referenced, so manual registration is required.
         .finish();
     let query = r#"{
             unionA {
@@ -214,7 +214,7 @@ pub async fn test_multiple_objects_in_multiple_unions() {
     }
 
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
-        .register_type::<UnionB>() // `UnionB` is not directly referenced, so manual registration is required.
+        .register_output_type::<UnionB>() // `UnionB` is not directly referenced, so manual registration is required.
         .finish();
     let query = r#"{
             myObj {
@@ -363,6 +363,122 @@ pub async fn test_union_flatten() {
             },
             "value3": {
                 "value1": 77,
+            }
+        })
+    );
+}
+
+#[tokio::test]
+pub async fn test_trait_object_in_union() {
+    pub trait ProductTrait: Send + Sync {
+        fn id(&self) -> &str;
+    }
+
+    #[Object]
+    impl dyn ProductTrait {
+        #[graphql(name = "id")]
+        async fn gql_id(&self, _ctx: &Context<'_>) -> &str {
+            self.id()
+        }
+    }
+
+    struct MyProduct;
+
+    impl ProductTrait for MyProduct {
+        fn id(&self) -> &str {
+            "abc"
+        }
+    }
+
+    #[derive(Union)]
+    pub enum Content {
+        Product(Box<dyn ProductTrait>),
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn value(&self) -> Content {
+            Content::Product(Box::new(MyProduct))
+        }
+    }
+
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    assert_eq!(
+        schema
+            .execute("{ value { ... on ProductTrait { id } } }")
+            .await
+            .into_result()
+            .unwrap()
+            .data,
+        value!({
+            "value": {
+                "id": "abc"
+            }
+        })
+    );
+}
+
+macro_rules! generate_union {
+    ($name:ident, $variant_ty:ty) => {
+        #[derive(Union)]
+        pub enum $name {
+            Val($variant_ty),
+        }
+    };
+}
+
+#[test]
+pub fn test_macro_generated_union() {
+    #[derive(SimpleObject)]
+    pub struct IntObj {
+        pub val: i32,
+    }
+
+    generate_union!(MyEnum, IntObj);
+
+    let _ = MyEnum::Val(IntObj { val: 1 });
+}
+
+#[tokio::test]
+pub async fn test_union_with_oneof_object() {
+    #[derive(SimpleObject, InputObject)]
+    #[graphql(input_name = "MyObjInput")]
+    struct MyObj {
+        id: i32,
+        title: String,
+    }
+
+    #[derive(OneofObject, Union)]
+    #[graphql(input_name = "NodeInput")]
+    enum Node {
+        MyObj(MyObj),
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn node(&self, input: Node) -> Node {
+            input
+        }
+    }
+
+    let query = r#"{
+            node(input: { myObj: { id: 10, title: "abc" } }) {
+                ... on MyObj {
+                    id title
+                }
+            }
+        }"#;
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    assert_eq!(
+        schema.execute(query).await.into_result().unwrap().data,
+        value!({
+            "node": {
+                "id": 10,
+                "title": "abc",
             }
         })
     );

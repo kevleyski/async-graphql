@@ -1,15 +1,18 @@
-use std::collections::HashMap;
-use std::fmt::{self, Display, Formatter};
+use std::{
+    collections::HashMap,
+    fmt::{self, Display, Formatter},
+};
 
 use async_graphql_value::Value;
 
-use crate::parser::types::{
-    Directive, ExecutableDocument, Field, FragmentDefinition, FragmentSpread, InlineFragment,
-    OperationDefinition, OperationType, Selection, SelectionSet, TypeCondition, VariableDefinition,
-};
-use crate::registry::{self, MetaType, MetaTypeName};
 use crate::{
-    ErrorExtensionValues, InputType, Name, Pos, Positioned, ServerError, ServerResult, Variables,
+    parser::types::{
+        Directive, ExecutableDocument, Field, FragmentDefinition, FragmentSpread, InlineFragment,
+        OperationDefinition, OperationType, Selection, SelectionSet, TypeCondition,
+        VariableDefinition,
+    },
+    registry::{self, MetaType, MetaTypeName},
+    InputType, Name, Pos, Positioned, ServerError, ServerResult, Variables,
 };
 
 #[doc(hidden)]
@@ -39,16 +42,7 @@ impl<'a> VisitorContext<'a> {
     }
 
     pub(crate) fn report_error<T: Into<String>>(&mut self, locations: Vec<Pos>, msg: T) {
-        self.errors.push(RuleError::new(locations, msg, None));
-    }
-
-    pub(crate) fn report_error_with_extensions<T: Into<String>>(
-        &mut self,
-        locations: Vec<Pos>,
-        msg: T,
-        extensions: Option<ErrorExtensionValues>,
-    ) {
-        self.errors.push(RuleError::new(locations, msg, extensions));
+        self.errors.push(RuleError::new(locations, msg));
     }
 
     pub(crate) fn append_errors(&mut self, errors: Vec<RuleError>) {
@@ -318,7 +312,7 @@ impl VisitorNil {
 pub(crate) struct VisitorCons<A, B>(A, B);
 
 impl<A, B> VisitorCons<A, B> {
-    pub(crate) fn with<V>(self, visitor: V) -> VisitorCons<V, Self> {
+    pub(crate) const fn with<V>(self, visitor: V) -> VisitorCons<V, Self> {
         VisitorCons(visitor, self)
     }
 }
@@ -563,7 +557,7 @@ fn visit_operation_definition<'a, V: Visitor<'a>>(
         OperationType::Subscription => ctx.registry.subscription_type.as_deref(),
     };
     if let Some(root_name) = root_name {
-        ctx.with_type(Some(&ctx.registry.types[&*root_name]), |ctx| {
+        ctx.with_type(Some(&ctx.registry.types[root_name]), |ctx| {
             visit_variable_definitions(v, ctx, &operation.node.variable_definitions);
             visit_directives(v, ctx, &operation.node.directives);
             visit_selection_set(v, ctx, &operation.node.selection_set);
@@ -610,6 +604,17 @@ fn visit_selection<'a, V: Visitor<'a>>(
                     |ctx| {
                         visit_field(v, ctx, field);
                     },
+                );
+            } else if ctx.current_type().map(|ty| match ty {
+                MetaType::Object {
+                    is_subscription, ..
+                } => *is_subscription,
+                _ => false,
+            }) == Some(true)
+            {
+                ctx.report_error(
+                    vec![field.pos],
+                    "Unknown field \"__typename\" on type \"Subscription\".",
                 );
             }
         }
@@ -798,19 +803,13 @@ fn visit_inline_fragment<'a, V: Visitor<'a>>(
 pub(crate) struct RuleError {
     pub(crate) locations: Vec<Pos>,
     pub(crate) message: String,
-    pub(crate) extensions: Option<ErrorExtensionValues>,
 }
 
 impl RuleError {
-    pub(crate) fn new(
-        locations: Vec<Pos>,
-        msg: impl Into<String>,
-        extensions: Option<ErrorExtensionValues>,
-    ) -> Self {
+    pub(crate) fn new(locations: Vec<Pos>, msg: impl Into<String>) -> Self {
         Self {
             locations,
             message: msg.into(),
-            extensions,
         }
     }
 }
@@ -840,9 +839,10 @@ impl From<RuleError> for ServerError {
     fn from(e: RuleError) -> Self {
         Self {
             message: e.message,
+            source: None,
             locations: e.locations,
             path: Vec::new(),
-            extensions: e.extensions,
+            extensions: None,
         }
     }
 }

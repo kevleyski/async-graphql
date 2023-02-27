@@ -1,11 +1,15 @@
+use async_graphql_value::Value;
 use indexmap::map::IndexMap;
 
-use crate::parser::types::{Directive, Field};
-use crate::registry::MetaInputValue;
-use crate::validation::suggestion::make_suggestion;
-use crate::validation::visitor::{Visitor, VisitorContext};
-use crate::{Name, Positioned};
-use async_graphql_value::Value;
+use crate::{
+    parser::types::{Directive, Field},
+    registry::MetaInputValue,
+    validation::{
+        suggestion::make_suggestion,
+        visitor::{Visitor, VisitorContext},
+    },
+    Name, Positioned,
+};
 
 enum ArgsType<'a> {
     Directive(&'a str),
@@ -17,7 +21,7 @@ enum ArgsType<'a> {
 
 #[derive(Default)]
 pub struct KnownArgumentNames<'a> {
-    current_args: Option<(&'a IndexMap<&'static str, MetaInputValue>, ArgsType<'a>)>,
+    current_args: Option<(&'a IndexMap<String, MetaInputValue>, ArgsType<'a>)>,
 }
 
 impl<'a> KnownArgumentNames<'a> {
@@ -26,7 +30,7 @@ impl<'a> KnownArgumentNames<'a> {
             " Did you mean",
             self.current_args
                 .iter()
-                .map(|(args, _)| args.iter().map(|arg| *arg.0))
+                .map(|(args, _)| args.iter().map(|arg| arg.0.as_str()))
                 .flatten(),
             name,
         )
@@ -75,7 +79,11 @@ impl<'a> Visitor<'a> for KnownArgumentNames<'a> {
                                 name,
                                 field_name,
                                 type_name,
-                                self.get_suggestion(name.node.as_str())
+                                if ctx.registry.enable_suggestions {
+                                    self.get_suggestion(name.node.as_str())
+                                } else {
+                                    String::new()
+                                }
                             ),
                         );
                     }

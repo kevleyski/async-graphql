@@ -1,5 +1,6 @@
 #![allow(clippy::cognitive_complexity)]
 #![allow(clippy::vec_init_then_push)]
+#![allow(clippy::uninlined_format_args)]
 #![forbid(unsafe_code)]
 
 extern crate proc_macro;
@@ -7,6 +8,7 @@ extern crate proc_macro;
 mod args;
 mod complex_object;
 mod description;
+mod directive;
 mod r#enum;
 mod input_object;
 mod interface;
@@ -14,17 +16,18 @@ mod merged_object;
 mod merged_subscription;
 mod newtype;
 mod object;
+mod oneof_object;
 mod output_type;
 mod scalar;
 mod simple_object;
 mod subscription;
 mod union;
 mod utils;
+mod validators;
 
 use darling::{FromDeriveInput, FromMeta};
 use proc_macro::TokenStream;
-use syn::parse_macro_input;
-use syn::{AttributeArgs, DeriveInput, ItemImpl};
+use syn::{parse_macro_input, AttributeArgs, DeriveInput, ItemFn, ItemImpl};
 
 #[proc_macro_attribute]
 #[allow(non_snake_case)]
@@ -196,6 +199,34 @@ pub fn derive_newtype(input: TokenStream) -> TokenStream {
             Err(err) => return TokenStream::from(err.write_errors()),
         };
     match newtype::generate(&newtype_args) {
+        Ok(expanded) => expanded,
+        Err(err) => err.write_errors().into(),
+    }
+}
+
+#[proc_macro_attribute]
+#[allow(non_snake_case)]
+pub fn Directive(args: TokenStream, input: TokenStream) -> TokenStream {
+    let directive_args =
+        match args::Directive::from_list(&parse_macro_input!(args as AttributeArgs)) {
+            Ok(directive_args) => directive_args,
+            Err(err) => return TokenStream::from(err.write_errors()),
+        };
+    let mut item_fn = parse_macro_input!(input as ItemFn);
+    match directive::generate(&directive_args, &mut item_fn) {
+        Ok(expanded) => expanded,
+        Err(err) => err.write_errors().into(),
+    }
+}
+
+#[proc_macro_derive(OneofObject, attributes(graphql))]
+pub fn derive_oneof_object(input: TokenStream) -> TokenStream {
+    let object_args =
+        match args::OneofObject::from_derive_input(&parse_macro_input!(input as DeriveInput)) {
+            Ok(object_args) => object_args,
+            Err(err) => return TokenStream::from(err.write_errors()),
+        };
+    match oneof_object::generate(&object_args) {
         Ok(expanded) => expanded,
         Err(err) => err.write_errors().into(),
     }

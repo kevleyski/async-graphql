@@ -1,0 +1,22 @@
+[package]
+authors = ["sunli <scott_s829@163.com>"]
+categories = ["network-programming", "asynchronous"]
+description = "async-graphql for poem"
+documentation = "https://docs.rs/async-graphql-poem/"
+edition = "2021"
+homepage = "https://github.com/async-graphql/async-graphql"
+keywords = ["futures", "async", "graphql", "poem"]
+license = "MIT/Apache-2.0"
+name = "async-graphql-poem"
+repository = "https://github.com/async-graphql/async-graphql"
+version = "5.0.6"
+
+[dependencies]
+async-graphql = { workspace = true }
+
+futures-util = { workspace = true, default-features = false }
+poem = { version = "1.3.48", features = ["websocket"] }
+serde_json.workspace = true
+tokio-util = { workspace = true, default-features = false, features = [
+    "compat",
+] }

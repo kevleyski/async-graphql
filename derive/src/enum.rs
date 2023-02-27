@@ -1,11 +1,12 @@
 use darling::ast::Data;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::ext::IdentExt;
-use syn::Error;
+use syn::{ext::IdentExt, Error};
 
-use crate::args::{self, RenameRuleExt, RenameTarget};
-use crate::utils::{gen_deprecation, get_crate_name, get_rustdoc, visible_fn, GeneratorResult};
+use crate::{
+    args::{self, RenameRuleExt, RenameTarget},
+    utils::{gen_deprecation, get_crate_name, get_rustdoc, visible_fn, GeneratorResult},
+};
 
 pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_name(enum_args.internal);
@@ -15,13 +16,24 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
         _ => return Err(Error::new_spanned(ident, "Enum can only be applied to an enum.").into()),
     };
 
-    let gql_typename = enum_args
-        .name
-        .clone()
-        .unwrap_or_else(|| RenameTarget::Type.rename(ident.to_string()));
+    let gql_typename = if !enum_args.name_type {
+        let name = enum_args
+            .name
+            .clone()
+            .unwrap_or_else(|| RenameTarget::Type.rename(ident.to_string()));
+        quote!(::std::borrow::Cow::Borrowed(#name))
+    } else {
+        quote!(<Self as #crate_name::TypeName>::type_name())
+    };
 
+    let inaccessible = enum_args.inaccessible;
+    let tags = enum_args
+        .tags
+        .iter()
+        .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
+        .collect::<Vec<_>>();
     let desc = get_rustdoc(&enum_args.attrs)?
-        .map(|s| quote! { ::std::option::Option::Some(#s) })
+        .map(|s| quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#s)) })
         .unwrap_or_else(|| quote! {::std::option::Option::None});
 
     let mut enum_items = Vec::new();
@@ -46,9 +58,15 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
                 .rename_items
                 .rename(variant.ident.unraw().to_string(), RenameTarget::EnumItem)
         });
+        let inaccessible = variant.inaccessible;
+        let tags = variant
+            .tags
+            .iter()
+            .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
+            .collect::<Vec<_>>();
         let item_deprecation = gen_deprecation(&variant.deprecation, &crate_name);
         let item_desc = get_rustdoc(&variant.attrs)?
-            .map(|s| quote! { ::std::option::Option::Some(#s) })
+            .map(|s| quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#s)) })
             .unwrap_or_else(|| quote! {::std::option::Option::None});
 
         enum_items.push(item_ident);
@@ -61,23 +79,21 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
 
         let visible = visible_fn(&variant.visible);
         schema_enum_items.push(quote! {
-            enum_items.insert(#gql_item_name, #crate_name::registry::MetaEnumValue {
-                name: #gql_item_name,
+            enum_items.insert(::std::string::ToString::to_string(#gql_item_name), #crate_name::registry::MetaEnumValue {
+                name: ::std::string::ToString::to_string(#gql_item_name),
                 description: #item_desc,
                 deprecation: #item_deprecation,
                 visible: #visible,
+                inaccessible: #inaccessible,
+                tags: ::std::vec![ #(#tags),* ],
             });
         });
     }
 
     let remote_conversion = if let Some(remote) = &enum_args.remote {
-        let remote_ty = if let Ok(ty) = syn::parse_str::<syn::Type>(remote) {
-            ty
-        } else {
-            return Err(
-                Error::new_spanned(remote, format!("Invalid remote type: '{}'", remote)).into(),
-            );
-        };
+        let remote_ty = syn::parse_str::<syn::Type>(remote).map_err(|_| {
+            Error::new_spanned(remote, format!("Invalid remote type: '{}'", remote))
+        })?;
 
         let local_to_remote_items = enum_items.iter().map(|item| {
             quote! {
@@ -112,7 +128,7 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
 
     if schema_enum_items.is_empty() {
         return Err(Error::new_spanned(
-            &ident,
+            ident,
             "A GraphQL Enum type must define one or more unique enum values.",
         )
         .into());
@@ -128,15 +144,15 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
         }
 
         #[allow(clippy::all, clippy::pedantic)]
-        impl #crate_name::Type for #ident {
-            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
-                ::std::borrow::Cow::Borrowed(#gql_typename)
+        impl #ident {
+            fn __type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                #gql_typename
             }
 
-            fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
-                registry.create_type::<Self, _>(|registry| {
+            fn __create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
+                registry.create_input_type::<Self, _>(#crate_name::registry::MetaTypeId::Enum, |registry| {
                     #crate_name::registry::MetaType::Enum {
-                        name: ::std::borrow::ToOwned::to_owned(#gql_typename),
+                        name: ::std::borrow::Cow::into_owned(#gql_typename),
                         description: #desc,
                         enum_values: {
                             let mut enum_items = #crate_name::indexmap::IndexMap::new();
@@ -144,6 +160,9 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
                             enum_items
                         },
                         visible: #visible,
+                        inaccessible: #inaccessible,
+                        tags: ::std::vec![ #(#tags),* ],
+                        rust_typename: ::std::option::Option::Some(::std::any::type_name::<Self>()),
                     }
                 })
             }
@@ -151,6 +170,16 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
 
         #[allow(clippy::all, clippy::pedantic)]
         impl #crate_name::InputType for #ident {
+            type RawValueType = Self;
+
+            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                Self::__type_name()
+            }
+
+            fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
+                Self::__create_type_info(registry)
+            }
+
             fn parse(value: ::std::option::Option<#crate_name::Value>) -> #crate_name::InputValueResult<Self> {
                 #crate_name::resolver_utils::parse_enum(value.unwrap_or_default())
             }
@@ -158,12 +187,30 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
             fn to_value(&self) -> #crate_name::Value {
                 #crate_name::resolver_utils::enum_value(*self)
             }
+
+            fn as_raw_value(&self) -> ::std::option::Option<&Self::RawValueType> {
+                ::std::option::Option::Some(self)
+            }
         }
 
         #[#crate_name::async_trait::async_trait]
         impl #crate_name::OutputType for #ident {
+            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                Self::__type_name()
+            }
+
+            fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
+                Self::__create_type_info(registry)
+            }
+
             async fn resolve(&self, _: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
                 ::std::result::Result::Ok(#crate_name::resolver_utils::enum_value(*self))
+            }
+        }
+
+        impl ::std::convert::From<#ident> for #crate_name::Value {
+            fn from(value: #ident) -> #crate_name::Value {
+                #crate_name::resolver_utils::enum_value(value)
             }
         }
 

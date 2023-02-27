@@ -1,34 +1,37 @@
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use async_graphql::http::WebSocketProtocols;
-use async_graphql::*;
+use async_graphql::{http::WebSocketProtocols, *};
 use futures_channel::mpsc;
-use futures_util::stream::{BoxStream, Stream, StreamExt};
-use futures_util::SinkExt;
+use futures_util::{
+    stream::{BoxStream, Stream, StreamExt},
+    SinkExt,
+};
 
 #[tokio::test]
 pub async fn test_subscription_ws_transport() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self) -> impl Stream<Item = i32> {
             futures_util::stream::iter(0..10)
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::GraphQLWS);
 
@@ -88,19 +91,19 @@ pub async fn test_subscription_ws_transport() {
 pub async fn test_subscription_ws_transport_with_token() {
     struct Token(String);
 
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self, ctx: &Context<'_>) -> Result<impl Stream<Item = i32>> {
             if ctx.data_unchecked::<Token>().0 != "123456" {
                 return Err("forbidden".into());
@@ -109,12 +112,10 @@ pub async fn test_subscription_ws_transport_with_token() {
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
-    let mut stream = http::WebSocket::with_data(
-        schema,
-        rx,
-        |value| async {
+    let mut stream = http::WebSocket::new(schema.clone(), rx, WebSocketProtocols::GraphQLWS)
+        .on_connection_init(|value| async {
             #[derive(serde::Deserialize)]
             struct Payload {
                 token: String,
@@ -124,14 +125,66 @@ pub async fn test_subscription_ws_transport_with_token() {
             let mut data = Data::default();
             data.insert(Token(payload.token));
             Ok(data)
-        },
-        WebSocketProtocols::GraphQLWS,
-    );
+        });
 
     tx.send(
         serde_json::to_string(&value!({
             "type": "connection_init",
             "payload": { "token": "123456" }
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        Some(value!({
+            "type": "connection_ack",
+        })),
+        serde_json::from_str(&stream.next().await.unwrap().unwrap_text()).unwrap()
+    );
+
+    tx.send(
+        serde_json::to_string(&value!({
+            "type": "start",
+            "id": "1",
+            "payload": {
+                "query": "subscription { values }"
+            },
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    for i in 0..10 {
+        assert_eq!(
+            Some(value!({
+                "type": "next",
+                "id": "1",
+                "payload": { "data": { "values": i } },
+            })),
+            serde_json::from_str(&stream.next().await.unwrap().unwrap_text()).unwrap()
+        );
+    }
+
+    assert_eq!(
+        Some(value!({
+            "type": "complete",
+            "id": "1",
+        })),
+        serde_json::from_str(&stream.next().await.unwrap().unwrap_text()).unwrap()
+    );
+
+    let (mut tx, rx) = mpsc::unbounded();
+    let mut data = Data::default();
+    data.insert(Token("123456".to_string()));
+    let mut stream =
+        http::WebSocket::new(schema, rx, WebSocketProtocols::GraphQLWS).connection_data(data);
+
+    tx.send(
+        serde_json::to_string(&value!({
+            "type": "connection_init",
         }))
         .unwrap(),
     )
@@ -195,25 +248,25 @@ pub async fn test_subscription_ws_transport_error() {
         }
     }
 
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self) -> impl Stream<Item = Event> {
             futures_util::stream::iter((0..10).map(|n| Event { value: n }))
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::GraphQLWS);
 
@@ -276,32 +329,28 @@ pub async fn test_subscription_ws_transport_error() {
 
 #[tokio::test]
 pub async fn test_subscription_init_error() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self) -> impl Stream<Item = i32> {
             futures_util::stream::once(async move { 10 })
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
-    let mut stream = http::WebSocket::with_data(
-        schema,
-        rx,
-        |_| async move { Err("Error!".into()) },
-        WebSocketProtocols::GraphQLWS,
-    );
+    let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::GraphQLWS)
+        .on_connection_init(|_| async move { Err("Error!".into()) });
 
     tx.send(
         serde_json::to_string(&value!({
@@ -320,25 +369,25 @@ pub async fn test_subscription_init_error() {
 
 #[tokio::test]
 pub async fn test_subscription_too_many_initialisation_requests_error() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self) -> impl Stream<Item = i32> {
             futures_util::stream::once(async move { 10 })
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::GraphQLWS);
 
@@ -375,16 +424,16 @@ pub async fn test_subscription_too_many_initialisation_requests_error() {
 
 #[tokio::test]
 pub async fn test_query_over_websocket() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             999
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::GraphQLWS);
 
@@ -437,16 +486,16 @@ pub async fn test_query_over_websocket() {
 
 #[tokio::test]
 pub async fn test_start_before_connection_init() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             999
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::GraphQLWS);
 
@@ -494,19 +543,19 @@ pub async fn test_stream_drop() {
         }
     }
 
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             999
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self, ctx: &Context<'_>) -> impl Stream<Item = i32> {
             TestStream {
                 inner: Box::pin(async_stream::stream! {
@@ -521,7 +570,7 @@ pub async fn test_stream_drop() {
     }
 
     let dropped = Dropped::default();
-    let schema = Schema::build(QueryRoot, EmptyMutation, SubscriptionRoot)
+    let schema = Schema::build(Query, EmptyMutation, Subscription)
         .data(dropped.clone())
         .finish();
     let (mut tx, rx) = mpsc::unbounded();
@@ -601,4 +650,80 @@ pub async fn test_stream_drop() {
     }
 
     assert!(*dropped.lock().unwrap());
+}
+
+#[tokio::test]
+pub async fn test_ping_pong() {
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn value(&self) -> i32 {
+            10
+        }
+    }
+
+    struct Subscription;
+
+    #[Subscription]
+    impl Subscription {
+        async fn values(&self) -> impl Stream<Item = i32> {
+            futures_util::stream::iter(0..10)
+        }
+    }
+
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
+    let (mut tx, rx) = mpsc::unbounded();
+    let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::GraphQLWS);
+
+    tx.send(
+        serde_json::to_string(&value!({
+            "type": "connection_init",
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stream.next().await.unwrap().unwrap_text())
+            .unwrap(),
+        serde_json::json!({
+            "type": "connection_ack",
+        }),
+    );
+
+    for _ in 0..5 {
+        tx.send(
+            serde_json::to_string(&value!({
+                "type": "ping",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stream.next().await.unwrap().unwrap_text())
+                .unwrap(),
+            serde_json::json!({
+                "type": "pong",
+            }),
+        );
+    }
+
+    tx.send(
+        serde_json::to_string(&value!({
+            "type": "pong",
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .is_err()
+    );
 }

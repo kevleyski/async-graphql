@@ -1,35 +1,38 @@
-use std::borrow::Cow;
-use std::pin::Pin;
+use std::{borrow::Cow, pin::Pin};
 
 use futures_util::stream::{self, Stream};
 
-use crate::{registry, Context, Response, ServerError, SubscriptionType, Type};
+use crate::{registry, Context, Response, ServerError, SubscriptionType};
 
 /// Empty subscription
 ///
-/// Only the parameters used to construct the Schema, representing an unconfigured subscription.
+/// Only the parameters used to construct the Schema, representing an
+/// unconfigured subscription.
 #[derive(Default, Copy, Clone)]
 pub struct EmptySubscription;
 
-impl Type for EmptySubscription {
+impl SubscriptionType for EmptySubscription {
     fn type_name() -> Cow<'static, str> {
         Cow::Borrowed("EmptyMutation")
     }
 
     fn create_type_info(registry: &mut registry::Registry) -> String {
-        registry.create_type::<Self, _>(|_| registry::MetaType::Object {
+        registry.create_subscription_type::<Self, _>(|_| registry::MetaType::Object {
             name: "EmptySubscription".to_string(),
             description: None,
             fields: Default::default(),
             cache_control: Default::default(),
             extends: false,
+            shareable: false,
             keys: None,
             visible: None,
+            inaccessible: false,
+            tags: Default::default(),
+            is_subscription: true,
+            rust_typename: Some(std::any::type_name::<Self>()),
         })
     }
-}
 
-impl SubscriptionType for EmptySubscription {
     fn is_empty() -> bool {
         true
     }

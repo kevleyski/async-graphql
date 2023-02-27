@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
 
-use http::header::HeaderMap;
+use http::{
+    header::{HeaderMap, HeaderName},
+    HeaderValue,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{CacheControl, Result, ServerError, Value};
 
 /// Query response
+#[non_exhaustive]
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Response {
     /// Data of query result
@@ -26,7 +30,7 @@ pub struct Response {
 
     /// HTTP headers
     #[serde(skip)]
-    pub http_headers: HeaderMap<String>,
+    pub http_headers: HeaderMap,
 }
 
 impl Response {
@@ -57,7 +61,7 @@ impl Response {
 
     /// Set the http headers of the response.
     #[must_use]
-    pub fn http_headers(self, http_headers: HeaderMap<String>) -> Self {
+    pub fn http_headers(self, http_headers: HeaderMap) -> Self {
         Self {
             http_headers,
             ..self
@@ -85,8 +89,8 @@ impl Response {
         !self.is_ok()
     }
 
-    /// Extract the error from the response. Only if the `error` field is empty will this return
-    /// `Ok`.
+    /// Extract the error from the response. Only if the `error` field is empty
+    /// will this return `Ok`.
     #[inline]
     pub fn into_result(self) -> Result<Self, Vec<ServerError>> {
         if self.is_err() {
@@ -98,6 +102,7 @@ impl Response {
 }
 
 /// Response for batchable queries
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum BatchResponse {
@@ -127,25 +132,30 @@ impl BatchResponse {
         }
     }
 
-    /// Provides an iterator over all of the HTTP headers set on the response
-    pub fn http_headers(&self) -> impl Iterator<Item = (&str, &str)> {
-        let it: Box<dyn Iterator<Item = (&str, &str)>> = match self {
-            BatchResponse::Single(resp) => Box::new(
-                resp.http_headers
-                    .iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str())),
-            ),
-            BatchResponse::Batch(resp) => Box::new(
-                resp.iter()
-                    .map(|r| {
-                        r.http_headers
-                            .iter()
-                            .map(|(key, value)| (key.as_str(), value.as_str()))
-                    })
-                    .flatten(),
-            ),
-        };
-        it
+    /// Returns HTTP headers map.
+    pub fn http_headers(&self) -> HeaderMap {
+        match self {
+            BatchResponse::Single(resp) => resp.http_headers.clone(),
+            BatchResponse::Batch(resp) => resp.iter().fold(HeaderMap::new(), |mut acc, resp| {
+                acc.extend(resp.http_headers.clone());
+                acc
+            }),
+        }
+    }
+
+    /// Returns HTTP headers iterator.
+    pub fn http_headers_iter(&self) -> impl Iterator<Item = (HeaderName, HeaderValue)> {
+        let headers = self.http_headers();
+
+        let mut current_name = None;
+        headers.into_iter().filter_map(move |(name, value)| {
+            if let Some(name) = name {
+                current_name = Some(name);
+            }
+            current_name
+                .clone()
+                .map(|current_name| (current_name, value))
+        })
     }
 }
 

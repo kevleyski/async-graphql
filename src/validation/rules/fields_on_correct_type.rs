@@ -1,7 +1,12 @@
-use crate::parser::types::Field;
-use crate::validation::suggestion::make_suggestion;
-use crate::validation::visitor::{Visitor, VisitorContext};
-use crate::{registry, Positioned};
+use crate::{
+    parser::types::Field,
+    registry,
+    validation::{
+        suggestion::make_suggestion,
+        visitor::{Visitor, VisitorContext},
+    },
+    Positioned,
+};
 
 #[derive(Default)]
 pub struct FieldsOnCorrectType;
@@ -33,17 +38,21 @@ impl<'a> Visitor<'a> for FieldsOnCorrectType {
                         "Unknown field \"{}\" on type \"{}\".{}",
                         field.node.name,
                         parent_type.name(),
-                        make_suggestion(
-                            " Did you mean",
-                            parent_type
-                                .fields()
-                                .iter()
-                                .map(|fields| fields.keys())
-                                .flatten()
-                                .map(String::as_str),
-                            &field.node.name.node,
-                        )
-                        .unwrap_or_default()
+                        if ctx.registry.enable_suggestions {
+                            make_suggestion(
+                                " Did you mean",
+                                parent_type
+                                    .fields()
+                                    .iter()
+                                    .map(|fields| fields.keys())
+                                    .flatten()
+                                    .map(String::as_str),
+                                &field.node.name.node,
+                            )
+                            .unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
                     ),
                 );
             }
@@ -328,5 +337,10 @@ mod tests {
           { __typename }
         "#,
         );
+    }
+
+    #[test]
+    fn typename_in_subscription_root() {
+        expect_fails_rule!(factory, "subscription { __typename }");
     }
 }

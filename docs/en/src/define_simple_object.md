@@ -1,11 +1,12 @@
 # SimpleObject
 
-`SimpleObject` directly maps all the fields of a struct to GraphQL object. 
+`SimpleObject` directly maps all the fields of a struct to GraphQL object.
 If you don't require automatic mapping of fields, see [Object](define_complex_object.html).
 
 The example below defines an object `MyObject` which includes the fields `a` and `b`. `c` will be not mapped to GraphQL as it is labelled as `#[graphql(skip)]`
 
 ```rust
+# extern crate async_graphql;
 use async_graphql::*;
 
 #[derive(SimpleObject)]
@@ -26,12 +27,14 @@ struct MyObject {
 Sometimes most of the fields of a GraphQL object simply return the value of the structure member, but a few
 fields are calculated. In this case, the [Object](define_complex_object.html) macro cannot be used unless you hand-write all the resolvers.
 
-The `ComplexObject` macro works in conjuction with the `SimpleObject` macro. The `SipmleObject` derive macro defines
+The `ComplexObject` macro works in conjunction with the `SimpleObject` macro. The `SimpleObject` derive macro defines
 the non-calculated fields, where as the `ComplexObject` macro let's you write user-defined resolvers for the calculated fields.
 
 Resolvers added to `ComplexObject` adhere to the same rules as resolvers of [Object](define_complex_object.html).
 
 ```rust
+# extern crate async_graphql;
+# use async_graphql::*;
 #[derive(SimpleObject)]
 #[graphql(complex)] // NOTE: If you want the `ComplexObject` macro to take effect, this `complex` attribute is required.
 struct MyObj {
@@ -42,7 +45,7 @@ struct MyObj {
 #[ComplexObject]
 impl MyObj {
     async fn c(&self) -> i32 {
-        self.a + self.b     
+        self.a + self.b
     }
 }
 ```
@@ -55,6 +58,12 @@ and specify how its concrete types should be implemented.
 In the following example, two `SimpleObject` types are created:
 
 ```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+# #[derive(SimpleObject)]
+# struct SomeType { a: i32 }
+# #[derive(SimpleObject)]
+# struct SomeOtherType { a: i32 }
 #[derive(SimpleObject)]
 #[graphql(concrete(name = "SomeName", params(SomeType)))]
 #[graphql(concrete(name = "SomeOtherName", params(SomeOtherType)))]
@@ -83,6 +92,19 @@ type SomeOtherName {
 In your resolver method or field of another object, use as a normal generic type:
 
 ```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+# #[derive(SimpleObject)]
+# struct SomeType { a: i32 }
+# #[derive(SimpleObject)]
+# struct SomeOtherType { a: i32 }
+# #[derive(SimpleObject)]
+# #[graphql(concrete(name = "SomeName", params(SomeType)))]
+# #[graphql(concrete(name = "SomeOtherName", params(SomeOtherType)))]
+# pub struct SomeGenericObject<T: OutputType> {
+#     field1: Option<T>,
+#     field2: String,
+# }
 #[derive(SimpleObject)]
 pub struct YetAnotherObject {
     a: SomeGenericObject<SomeType>,
@@ -91,3 +113,16 @@ pub struct YetAnotherObject {
 ```
 
 You can pass multiple generic types to `params()`, separated by a comma.
+
+## Used for both input and output
+
+```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+#[derive(SimpleObject, InputObject)]
+#[graphql(input_name = "MyObjInput")] // Note: You must use the input_name attribute to define a new name for the input type, otherwise a runtime error will occur.
+struct MyObj {
+    a: i32,
+    b: i32,
+}
+```

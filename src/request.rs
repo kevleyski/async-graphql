@@ -1,16 +1,23 @@
-use std::any::Any;
-use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::fmt::{self, Debug, Formatter};
+use std::{
+    any::Any,
+    collections::HashMap,
+    fmt::{self, Debug, Formatter},
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{Data, ParseRequestError, UploadValue, Value, Variables};
+use crate::{
+    parser::{parse_query, types::ExecutableDocument},
+    schema::IntrospectionMode,
+    Data, ParseRequestError, ServerError, UploadValue, Value, Variables,
+};
 
 /// GraphQL request.
 ///
-/// This can be deserialized from a structure of the query string, the operation name and the
-/// variables. The names are all in `camelCase` (e.g. `operationName`).
+/// This can be deserialized from a structure of the query string, the operation
+/// name and the variables. The names are all in `camelCase` (e.g.
+/// `operationName`).
+#[non_exhaustive]
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
@@ -40,9 +47,13 @@ pub struct Request {
     #[serde(default)]
     pub extensions: HashMap<String, Value>,
 
-    /// Disable introspection queries for this request.
     #[serde(skip)]
-    pub disable_introspection: bool,
+    pub(crate) parsed_query: Option<ExecutableDocument>,
+
+    /// Sets the introspection mode for this request (defaults to
+    /// [IntrospectionMode::Enabled]).
+    #[serde(skip)]
+    pub introspection_mode: IntrospectionMode,
 }
 
 impl Request {
@@ -55,11 +66,13 @@ impl Request {
             uploads: Vec::default(),
             data: Data::default(),
             extensions: Default::default(),
-            disable_introspection: false,
+            parsed_query: None,
+            introspection_mode: IntrospectionMode::Enabled,
         }
     }
 
     /// Specify the operation name of the request.
+    #[must_use]
     pub fn operation_name<T: Into<String>>(self, name: T) -> Self {
         Self {
             operation_name: Some(name.into()),
@@ -68,28 +81,56 @@ impl Request {
     }
 
     /// Specify the variables.
+    #[must_use]
     pub fn variables(self, variables: Variables) -> Self {
         Self { variables, ..self }
     }
 
     /// Insert some data for this request.
+    #[must_use]
     pub fn data<D: Any + Send + Sync>(mut self, data: D) -> Self {
         self.data.insert(data);
         self
     }
 
     /// Disable introspection queries for this request.
+    #[must_use]
     pub fn disable_introspection(mut self) -> Self {
-        self.disable_introspection = true;
+        self.introspection_mode = IntrospectionMode::Disabled;
         self
+    }
+
+    /// Only allow introspection queries for this request.
+    #[must_use]
+    pub fn only_introspection(mut self) -> Self {
+        self.introspection_mode = IntrospectionMode::IntrospectionOnly;
+        self
+    }
+
+    #[inline]
+    /// Performs parsing of query ahead of execution.
+    ///
+    /// This effectively allows to inspect query information, before passing
+    /// request to schema for execution as long as query is valid.
+    pub fn parsed_query(&mut self) -> Result<&ExecutableDocument, ServerError> {
+        if self.parsed_query.is_none() {
+            match parse_query(&self.query) {
+                Ok(parsed) => self.parsed_query = Some(parsed),
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        // forbid_unsafe effectively bans optimize away else branch here so use unwrap
+        // but this unwrap never panics
+        Ok(self.parsed_query.as_ref().unwrap())
     }
 
     /// Set a variable to an upload value.
     ///
-    /// `var_path` is a dot-separated path to the item that begins with `variables`, for example
-    /// `variables.files.2.content` is equivalent to the Rust code
-    /// `request.variables["files"][2]["content"]`. If no variable exists at the path this function
-    /// won't do anything.
+    /// `var_path` is a dot-separated path to the item that begins with
+    /// `variables`, for example `variables.files.2.content` is equivalent
+    /// to the Rust code `request.variables["files"][2]["content"]`. If no
+    /// variable exists at the path this function won't do anything.
     pub fn set_upload(&mut self, var_path: &str, upload: UploadValue) {
         fn variable_path<'a>(variables: &'a mut Variables, path: &str) -> Option<&'a mut Value> {
             let mut parts = path.strip_prefix("variables.")?.split('.');
@@ -133,11 +174,13 @@ impl Debug for Request {
     }
 }
 
-/// Batch support for GraphQL requests, which is either a single query, or an array of queries
+/// Batch support for GraphQL requests, which is either a single query, or an
+/// array of queries
 ///
 /// **Reference:** <https://www.apollographql.com/blog/batching-client-graphql-queries-a685f5bcd41b/>
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)] // Request is at fault
 pub enum BatchRequest {
     /// Single query
     Single(Request),
@@ -152,13 +195,69 @@ impl BatchRequest {
     ///
     /// # Errors
     ///
-    /// Fails if the batch request is a list of requests with a message saying that batch requests
-    /// aren't supported.
+    /// Fails if the batch request is a list of requests with a message saying
+    /// that batch requests aren't supported.
     pub fn into_single(self) -> Result<Request, ParseRequestError> {
         match self {
             Self::Single(req) => Ok(req),
             Self::Batch(_) => Err(ParseRequestError::UnsupportedBatch),
         }
+    }
+
+    /// Returns an iterator over the requests.
+    pub fn iter(&self) -> impl Iterator<Item = &Request> {
+        match self {
+            BatchRequest::Single(request) => {
+                Box::new(std::iter::once(request)) as Box<dyn Iterator<Item = &Request>>
+            }
+            BatchRequest::Batch(requests) => Box::new(requests.iter()),
+        }
+    }
+
+    /// Returns an iterator that allows modifying each request.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Request> {
+        match self {
+            BatchRequest::Single(request) => {
+                Box::new(std::iter::once(request)) as Box<dyn Iterator<Item = &mut Request>>
+            }
+            BatchRequest::Batch(requests) => Box::new(requests.iter_mut()),
+        }
+    }
+
+    /// Specify the variables for each requests.
+    #[must_use]
+    pub fn variables(mut self, variables: Variables) -> Self {
+        for request in self.iter_mut() {
+            request.variables = variables.clone();
+        }
+        self
+    }
+
+    /// Insert some data for  for each requests.
+    #[must_use]
+    pub fn data<D: Any + Clone + Send + Sync>(mut self, data: D) -> Self {
+        for request in self.iter_mut() {
+            request.data.insert(data.clone());
+        }
+        self
+    }
+
+    /// Disable introspection queries for each request.
+    #[must_use]
+    pub fn disable_introspection(mut self) -> Self {
+        for request in self.iter_mut() {
+            request.introspection_mode = IntrospectionMode::Disabled;
+        }
+        self
+    }
+
+    /// Only allow introspection queries for each request.
+    #[must_use]
+    pub fn introspection_only(mut self) -> Self {
+        for request in self.iter_mut() {
+            request.introspection_mode = IntrospectionMode::IntrospectionOnly;
+        }
+        self
     }
 }
 

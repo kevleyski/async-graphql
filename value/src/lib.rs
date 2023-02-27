@@ -1,6 +1,7 @@
 //! Value for GraphQL. Used in the [`async-graphql`](https://crates.io/crates/async-graphql) crate.
 
 #![warn(missing_docs)]
+#![allow(clippy::uninlined_format_args)]
 #![forbid(unsafe_code)]
 
 mod deserializer;
@@ -9,21 +10,21 @@ mod serializer;
 mod value_serde;
 mod variables;
 
-use std::borrow::{Borrow, Cow};
-use std::collections::BTreeMap;
-use std::convert::{TryFrom, TryInto};
-use std::fmt::{self, Display, Formatter, Write};
-use std::iter::FromIterator;
-use std::ops::Deref;
-use std::sync::Arc;
+use std::{
+    borrow::{Borrow, Cow},
+    fmt::{self, Display, Formatter, Write},
+    ops::Deref,
+    sync::Arc,
+};
 
 use bytes::Bytes;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 pub use deserializer::{from_value, DeserializerError};
+#[doc(hidden)]
+pub use indexmap;
+use indexmap::IndexMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use serde_json::Number;
 pub use serializer::{to_value, SerializerError};
-
 pub use variables::Variables;
 
 /// A GraphQL name.
@@ -118,8 +119,9 @@ impl<'de> Deserialize<'de> for Name {
 
 /// A resolved GraphQL value, for example `1` or `"Hello World!"`.
 ///
-/// It can be serialized and deserialized. Enums will be converted to strings. Attempting to
-/// serialize `Upload` will fail, and `Enum` and `Upload` cannot be deserialized.
+/// It can be serialized and deserialized. Enums will be converted to strings.
+/// Attempting to serialize `Upload` will fail, and `Enum` and `Upload` cannot
+/// be deserialized.
 ///
 /// [Reference](https://spec.graphql.org/June2018/#Value).
 #[derive(Clone, Debug, Eq)]
@@ -139,7 +141,7 @@ pub enum ConstValue {
     /// A list of values.
     List(Vec<ConstValue>),
     /// An object. This is a map of keys to values.
-    Object(BTreeMap<Name, ConstValue>),
+    Object(IndexMap<Name, ConstValue>),
 }
 
 impl PartialEq for ConstValue {
@@ -190,6 +192,7 @@ macro_rules! from_integer {
     ($($ty:ident),*) => {
         $(
             impl From<$ty> for ConstValue {
+                #[inline]
                 fn from(n: $ty) -> Self {
                     ConstValue::Number(n.into())
                 }
@@ -201,36 +204,49 @@ macro_rules! from_integer {
 from_integer!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 
 impl From<f32> for ConstValue {
+    #[inline]
     fn from(f: f32) -> Self {
         From::from(f as f64)
     }
 }
 
 impl From<f64> for ConstValue {
+    #[inline]
     fn from(f: f64) -> Self {
         Number::from_f64(f).map_or(ConstValue::Null, ConstValue::Number)
     }
 }
 
 impl From<bool> for ConstValue {
+    #[inline]
     fn from(value: bool) -> Self {
         ConstValue::Boolean(value)
     }
 }
 
 impl From<String> for ConstValue {
+    #[inline]
     fn from(value: String) -> Self {
         ConstValue::String(value)
     }
 }
 
+impl From<Name> for ConstValue {
+    #[inline]
+    fn from(value: Name) -> Self {
+        ConstValue::Enum(value)
+    }
+}
+
 impl<'a> From<&'a str> for ConstValue {
+    #[inline]
     fn from(value: &'a str) -> Self {
         ConstValue::String(value.into())
     }
 }
 
 impl<'a> From<Cow<'a, str>> for ConstValue {
+    #[inline]
     fn from(f: Cow<'a, str>) -> Self {
         ConstValue::String(f.into_owned())
     }
@@ -254,8 +270,8 @@ impl<T: Into<ConstValue>> From<Vec<T>> for ConstValue {
     }
 }
 
-impl From<BTreeMap<Name, ConstValue>> for ConstValue {
-    fn from(f: BTreeMap<Name, ConstValue>) -> Self {
+impl From<IndexMap<Name, ConstValue>> for ConstValue {
+    fn from(f: IndexMap<Name, ConstValue>) -> Self {
         ConstValue::Object(f)
     }
 }
@@ -282,7 +298,8 @@ impl ConstValue {
         }
     }
 
-    /// Attempt to convert the value into JSON. This is equivalent to the `TryFrom` implementation.
+    /// Attempt to convert the value into JSON. This is equivalent to the
+    /// `TryFrom` implementation.
     ///
     /// # Errors
     ///
@@ -291,7 +308,8 @@ impl ConstValue {
         self.try_into()
     }
 
-    /// Attempt to convert JSON into a value. This is equivalent to the `TryFrom` implementation.
+    /// Attempt to convert JSON into a value. This is equivalent to the
+    /// `TryFrom` implementation.
     ///
     /// # Errors
     ///
@@ -340,9 +358,9 @@ impl TryFrom<ConstValue> for serde_json::Value {
 /// A GraphQL value, for example `1`, `$name` or `"Hello World!"`. This is
 /// [`ConstValue`](enum.ConstValue.html) with variables.
 ///
-/// It can be serialized and deserialized. Enums will be converted to strings. Attempting to
-/// serialize `Upload` or `Variable` will fail, and `Enum`, `Upload` and `Variable` cannot be
-/// deserialized.
+/// It can be serialized and deserialized. Enums will be converted to strings.
+/// Attempting to serialize `Upload` or `Variable` will fail, and `Enum`,
+/// `Upload` and `Variable` cannot be deserialized.
 ///
 /// [Reference](https://spec.graphql.org/June2018/#Value).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -364,11 +382,12 @@ pub enum Value {
     /// A list of values.
     List(Vec<Value>),
     /// An object. This is a map of keys to values.
-    Object(BTreeMap<Name, Value>),
+    Object(IndexMap<Name, Value>),
 }
 
 impl Value {
-    /// Attempt to convert the value into a const value by using a function to get a variable.
+    /// Attempt to convert the value into a const value by using a function to
+    /// get a variable.
     pub fn into_const_with<E>(
         self,
         mut f: impl FnMut(Name) -> Result<ConstValue, E>,
@@ -410,7 +429,8 @@ impl Value {
         self.into_const_with(|_| Err(())).ok()
     }
 
-    /// Attempt to convert the value into JSON. This is equivalent to the `TryFrom` implementation.
+    /// Attempt to convert the value into JSON. This is equivalent to the
+    /// `TryFrom` implementation.
     ///
     /// # Errors
     ///
@@ -419,7 +439,8 @@ impl Value {
         self.try_into()
     }
 
-    /// Attempt to convert JSON into a value. This is equivalent to the `TryFrom` implementation.
+    /// Attempt to convert JSON into a value. This is equivalent to the
+    /// `TryFrom` implementation.
     ///
     /// # Errors
     ///

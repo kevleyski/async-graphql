@@ -1,16 +1,18 @@
-use pest::iterators::Pair;
-use pest::RuleType;
+use std::{
+    borrow::{Borrow, BorrowMut},
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    str::Chars,
+};
+
+use pest::{iterators::Pair, RuleType};
 use serde::{Deserialize, Serialize};
-use std::borrow::{Borrow, BorrowMut};
-use std::cmp::Ordering;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::str::Chars;
 
 /// Original position of an element in source code.
 ///
 /// You can serialize and deserialize it to the GraphQL `locations` format
-/// ([reference](https://spec.graphql.org/June2018/#sec-Errors)).
+/// ([reference](https://spec.graphql.org/October2021/#sec-Errors)).
 #[derive(PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, Hash, Serialize, Deserialize)]
 pub struct Pos {
     /// One-based line number.
@@ -39,7 +41,7 @@ impl From<(usize, usize)> for Pos {
 }
 
 /// An AST node that stores its original position.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Positioned<T: ?Sized> {
     /// The position of the node.
     pub pos: Pos,
@@ -56,8 +58,8 @@ impl<T> Positioned<T> {
 
     /// Get the inner node.
     ///
-    /// This is most useful in callback chains where `Positioned::into_inner` is easier to read than
-    /// `|positioned| positioned.node`.
+    /// This is most useful in callback chains where `Positioned::into_inner` is
+    /// easier to read than `|positioned| positioned.node`.
     #[inline]
     pub fn into_inner(self) -> T {
         self.node
