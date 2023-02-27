@@ -1,16 +1,23 @@
-use darling::ast::{Data, Fields};
-use darling::util::Ignored;
-use darling::{FromDeriveInput, FromField, FromMeta, FromVariant};
+use std::fmt::{self, Display, Formatter};
+
+use darling::{
+    ast::{Data, Fields},
+    util::{Ignored, SpannedValue},
+    FromDeriveInput, FromField, FromMeta, FromVariant,
+};
 use inflector::Inflector;
 use syn::{
     Attribute, Generics, Ident, Lit, LitBool, LitStr, Meta, NestedMeta, Path, Type, Visibility,
 };
 
-#[derive(FromMeta)]
+use crate::validators::Validators;
+
+#[derive(FromMeta, Clone)]
 #[darling(default)]
 pub struct CacheControl {
     public: bool,
     private: bool,
+    pub no_cache: bool,
     pub max_age: usize,
 }
 
@@ -19,6 +26,7 @@ impl Default for CacheControl {
         Self {
             public: true,
             private: false,
+            no_cache: false,
             max_age: 0,
         }
     }
@@ -46,7 +54,7 @@ impl FromMeta for DefaultValue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Visible {
     None,
     HiddenAlways,
@@ -86,7 +94,7 @@ pub struct ConcreteType {
     pub params: PathList,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Deprecation {
     NoDeprecated,
     Deprecated { reason: Option<String> },
@@ -126,6 +134,11 @@ pub struct SimpleObjectField {
     #[darling(default)]
     pub skip: bool,
     #[darling(default)]
+    pub skip_output: bool,
+    // for InputObject
+    #[darling(default)]
+    pub skip_input: bool,
+    #[darling(default)]
     pub name: Option<String>,
     #[darling(default)]
     pub deprecation: Deprecation,
@@ -140,9 +153,32 @@ pub struct SimpleObjectField {
     #[darling(default)]
     pub requires: Option<String>,
     #[darling(default)]
-    pub guard: Option<Meta>,
+    pub shareable: bool,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    #[darling(default)]
+    pub override_from: Option<String>,
+    #[darling(default)]
+    pub guard: Option<SpannedValue<String>>,
     #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default, multiple)]
+    pub derived: Vec<DerivedField>,
+    #[darling(default)]
+    pub process_with: Option<String>,
+    // for InputObject
+    #[darling(default)]
+    pub default: Option<DefaultValue>,
+    #[darling(default)]
+    pub default_with: Option<LitStr>,
+    #[darling(default)]
+    pub validator: Option<Validators>,
+    #[darling(default)]
+    pub flatten: bool,
+    #[darling(default)]
+    pub secret: bool,
 }
 
 #[derive(FromDeriveInput)]
@@ -156,11 +192,13 @@ pub struct SimpleObject {
     #[darling(default)]
     pub internal: bool,
     #[darling(default)]
-    pub dummy: bool,
+    pub fake: bool,
     #[darling(default)]
     pub complex: bool,
     #[darling(default)]
     pub name: Option<String>,
+    #[darling(default)]
+    pub name_type: bool,
     #[darling(default)]
     pub rename_fields: Option<RenameRule>,
     #[darling(default)]
@@ -170,11 +208,22 @@ pub struct SimpleObject {
     #[darling(default)]
     pub extends: bool,
     #[darling(default)]
+    pub shareable: bool,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    #[darling(default)]
     pub visible: Option<Visible>,
     #[darling(default, multiple, rename = "concrete")]
     pub concretes: Vec<ConcreteType>,
     #[darling(default)]
     pub serial: bool,
+    // for InputObject
+    #[darling(default)]
+    pub input_name: Option<String>,
+    #[darling(default)]
+    pub guard: Option<SpannedValue<String>>,
 }
 
 #[derive(FromMeta, Default)]
@@ -184,9 +233,14 @@ pub struct Argument {
     pub desc: Option<String>,
     pub default: Option<DefaultValue>,
     pub default_with: Option<LitStr>,
-    pub validator: Option<Meta>,
+    pub validator: Option<Validators>,
+    #[darling(default)]
+    pub process_with: Option<String>,
     pub key: bool, // for entity
     pub visible: Option<Visible>,
+    pub inaccessible: bool,
+    #[darling(multiple, rename = "tag")]
+    pub tags: Vec<String>,
     pub secret: bool,
 }
 
@@ -195,13 +249,22 @@ pub struct Argument {
 pub struct Object {
     pub internal: bool,
     pub name: Option<String>,
+    pub name_type: bool,
     pub rename_fields: Option<RenameRule>,
     pub rename_args: Option<RenameRule>,
     pub cache_control: CacheControl,
     pub extends: bool,
+    pub shareable: bool,
+    pub inaccessible: bool,
+    #[darling(multiple, rename = "tag")]
+    pub tags: Vec<String>,
     pub use_type_description: bool,
     pub visible: Option<Visible>,
     pub serial: bool,
+    #[darling(multiple, rename = "concrete")]
+    pub concretes: Vec<ConcreteType>,
+    #[darling(default)]
+    pub guard: Option<SpannedValue<String>>,
 }
 
 pub enum ComplexityType {
@@ -238,9 +301,28 @@ pub struct ObjectField {
     pub external: bool,
     pub provides: Option<String>,
     pub requires: Option<String>,
-    pub guard: Option<Meta>,
+    pub shareable: bool,
+    pub inaccessible: bool,
+    #[darling(multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    pub override_from: Option<String>,
+    pub guard: Option<SpannedValue<String>>,
     pub visible: Option<Visible>,
     pub complexity: Option<ComplexityType>,
+    #[darling(default, multiple)]
+    pub derived: Vec<DerivedField>,
+    pub flatten: bool,
+}
+
+#[derive(FromMeta, Default, Clone)]
+#[darling(default)]
+/// Derivied fields arguments: are used to generate derivied fields.
+pub struct DerivedField {
+    pub name: Option<Ident>,
+    pub into: Option<String>,
+    pub with: Option<Path>,
+    #[darling(default)]
+    pub owned: Option<bool>,
 }
 
 #[derive(FromDeriveInput)]
@@ -256,11 +338,17 @@ pub struct Enum {
     #[darling(default)]
     pub name: Option<String>,
     #[darling(default)]
+    pub name_type: bool,
+    #[darling(default)]
     pub rename_items: Option<RenameRule>,
     #[darling(default)]
     pub remote: Option<String>,
     #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
 }
 
 #[derive(FromVariant)]
@@ -276,6 +364,10 @@ pub struct EnumItem {
     pub deprecation: Deprecation,
     #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
 }
 
 #[derive(FromDeriveInput)]
@@ -291,7 +383,16 @@ pub struct Union {
     #[darling(default)]
     pub name: Option<String>,
     #[darling(default)]
+    pub name_type: bool,
+    #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    // for OneofObject
+    #[darling(default)]
+    pub input_name: Option<String>,
 }
 
 #[derive(FromVariant)]
@@ -319,13 +420,24 @@ pub struct InputObjectField {
     #[darling(default)]
     pub default_with: Option<LitStr>,
     #[darling(default)]
-    pub validator: Option<Meta>,
+    pub validator: Option<Validators>,
     #[darling(default)]
     pub flatten: bool,
     #[darling(default)]
     pub skip: bool,
     #[darling(default)]
+    pub skip_input: bool,
+    #[darling(default)]
+    pub process_with: Option<String>,
+    // for SimpleObject
+    #[darling(default)]
+    pub skip_output: bool,
+    #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
     #[darling(default)]
     pub secret: bool,
 }
@@ -343,9 +455,71 @@ pub struct InputObject {
     #[darling(default)]
     pub name: Option<String>,
     #[darling(default)]
+    pub name_type: bool,
+    #[darling(default)]
+    pub input_name: Option<String>,
+    #[darling(default)]
     pub rename_fields: Option<RenameRule>,
     #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    #[darling(default, multiple, rename = "concrete")]
+    pub concretes: Vec<ConcreteType>,
+    #[darling(default)]
+    pub validator: Option<SpannedValue<String>>,
+    // for SimpleObject
+    #[darling(default)]
+    pub complex: bool,
+}
+
+#[derive(FromVariant)]
+#[darling(attributes(graphql), forward_attrs(doc))]
+pub struct OneofObjectField {
+    pub ident: Ident,
+    pub attrs: Vec<Attribute>,
+    pub fields: Fields<syn::Type>,
+
+    #[darling(default)]
+    pub name: Option<String>,
+    #[darling(default)]
+    pub validator: Option<Validators>,
+    #[darling(default)]
+    pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    #[darling(default)]
+    pub secret: bool,
+}
+
+#[derive(FromDeriveInput)]
+#[darling(attributes(graphql), forward_attrs(doc))]
+pub struct OneofObject {
+    pub ident: Ident,
+    pub generics: Generics,
+    pub attrs: Vec<Attribute>,
+    pub data: Data<OneofObjectField, Ignored>,
+
+    #[darling(default)]
+    pub internal: bool,
+    #[darling(default)]
+    pub name: Option<String>,
+    #[darling(default)]
+    pub input_name: Option<String>,
+    #[darling(default)]
+    pub name_type: bool,
+    #[darling(default)]
+    pub rename_fields: Option<RenameRule>,
+    #[darling(default)]
+    pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
     #[darling(default, multiple, rename = "concrete")]
     pub concretes: Vec<ConcreteType>,
 }
@@ -364,12 +538,16 @@ pub struct InterfaceFieldArgument {
     #[darling(default)]
     pub visible: Option<Visible>,
     #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    #[darling(default)]
     pub secret: bool,
 }
 
 #[derive(FromMeta)]
 pub struct InterfaceField {
-    pub name: String,
+    pub name: SpannedValue<String>,
     #[darling(rename = "type")]
     pub ty: LitStr,
     #[darling(default)]
@@ -388,6 +566,14 @@ pub struct InterfaceField {
     pub requires: Option<String>,
     #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    #[darling(default)]
+    pub shareable: bool,
+    #[darling(default)]
+    pub override_from: Option<String>,
 }
 
 #[derive(FromVariant)]
@@ -409,6 +595,8 @@ pub struct Interface {
     #[darling(default)]
     pub name: Option<String>,
     #[darling(default)]
+    pub name_type: bool,
+    #[darling(default)]
     pub rename_fields: Option<RenameRule>,
     #[darling(default)]
     pub rename_args: Option<RenameRule>,
@@ -418,6 +606,10 @@ pub struct Interface {
     pub extends: bool,
     #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
 }
 
 #[derive(FromMeta, Default)]
@@ -425,8 +617,14 @@ pub struct Interface {
 pub struct Scalar {
     pub internal: bool,
     pub name: Option<String>,
+    #[darling(default)]
+    pub name_type: bool,
     pub use_type_description: bool,
     pub visible: Option<Visible>,
+    pub inaccessible: bool,
+    #[darling(multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    pub specified_by_url: Option<String>,
 }
 
 #[derive(FromMeta, Default)]
@@ -434,10 +632,15 @@ pub struct Scalar {
 pub struct Subscription {
     pub internal: bool,
     pub name: Option<String>,
+    #[darling(default)]
+    pub name_type: bool,
     pub rename_fields: Option<RenameRule>,
     pub rename_args: Option<RenameRule>,
     pub use_type_description: bool,
     pub extends: bool,
+    pub visible: Option<Visible>,
+    #[darling(default)]
+    pub guard: Option<SpannedValue<String>>,
 }
 
 #[derive(FromMeta, Default)]
@@ -447,7 +650,9 @@ pub struct SubscriptionFieldArgument {
     pub desc: Option<String>,
     pub default: Option<DefaultValue>,
     pub default_with: Option<LitStr>,
-    pub validator: Option<Meta>,
+    pub validator: Option<Validators>,
+    #[darling(default)]
+    pub process_with: Option<String>,
     pub visible: Option<Visible>,
     pub secret: bool,
 }
@@ -458,14 +663,13 @@ pub struct SubscriptionField {
     pub skip: bool,
     pub name: Option<String>,
     pub deprecation: Deprecation,
-    pub guard: Option<Meta>,
+    pub guard: Option<SpannedValue<String>>,
     pub visible: Option<Visible>,
     pub complexity: Option<ComplexityType>,
 }
 
 #[derive(FromField)]
 pub struct MergedObjectField {
-    pub ident: Option<Ident>,
     pub ty: Type,
 }
 
@@ -482,9 +686,17 @@ pub struct MergedObject {
     #[darling(default)]
     pub name: Option<String>,
     #[darling(default)]
+    pub name_type: bool,
+    #[darling(default)]
     pub cache_control: CacheControl,
     #[darling(default)]
     pub extends: bool,
+    #[darling(default)]
+    pub shareable: bool,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
     #[darling(default)]
     pub visible: Option<Visible>,
     #[darling(default)]
@@ -493,7 +705,6 @@ pub struct MergedObject {
 
 #[derive(FromField)]
 pub struct MergedSubscriptionField {
-    pub ident: Option<Ident>,
     pub ty: Type,
 }
 
@@ -509,6 +720,8 @@ pub struct MergedSubscription {
     pub internal: bool,
     #[darling(default)]
     pub name: Option<String>,
+    #[darling(default)]
+    pub name_type: bool,
     #[darling(default)]
     pub visible: Option<Visible>,
     #[darling(default)]
@@ -633,15 +846,21 @@ pub struct NewType {
     pub name: NewTypeName,
     #[darling(default)]
     pub visible: Option<Visible>,
+    #[darling(default)]
+    pub inaccessible: bool,
+    #[darling(default, multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    #[darling(default)]
+    pub specified_by_url: Option<String>,
 }
 
 #[derive(FromMeta, Default)]
 #[darling(default)]
 pub struct ComplexObject {
     pub internal: bool,
-    pub name: Option<String>,
     pub rename_fields: Option<RenameRule>,
     pub rename_args: Option<RenameRule>,
+    pub guard: Option<SpannedValue<String>>,
 }
 
 #[derive(FromMeta, Default)]
@@ -654,7 +873,43 @@ pub struct ComplexObjectField {
     pub external: bool,
     pub provides: Option<String>,
     pub requires: Option<String>,
-    pub guard: Option<Meta>,
+    pub shareable: bool,
+    pub inaccessible: bool,
+    #[darling(multiple, rename = "tag")]
+    pub tags: Vec<String>,
+    pub override_from: Option<String>,
+    pub guard: Option<SpannedValue<String>>,
     pub visible: Option<Visible>,
     pub complexity: Option<ComplexityType>,
+    #[darling(multiple)]
+    pub derived: Vec<DerivedField>,
+    pub flatten: bool,
+}
+
+#[derive(FromMeta, Default)]
+#[darling(default)]
+pub struct Directive {
+    pub internal: bool,
+    pub name: Option<String>,
+    #[darling(default)]
+    pub name_type: bool,
+    pub visible: Option<Visible>,
+    pub repeatable: bool,
+    pub rename_args: Option<RenameRule>,
+    #[darling(multiple, rename = "location")]
+    pub locations: Vec<DirectiveLocation>,
+}
+
+#[derive(Debug, Copy, Clone, FromMeta)]
+#[darling(rename_all = "lowercase")]
+pub enum DirectiveLocation {
+    Field,
+}
+
+impl Display for DirectiveLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            DirectiveLocation::Field => write!(f, "FIELD"),
+        }
+    }
 }

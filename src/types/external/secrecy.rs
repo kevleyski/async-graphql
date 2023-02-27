@@ -1,10 +1,12 @@
 use std::borrow::Cow;
 
-use secrecy::{Secret, Zeroize};
+use secrecy::{ExposeSecret, Secret, Zeroize};
 
-use crate::{registry, InputType, InputValueError, InputValueResult, Type, Value};
+use crate::{registry, InputType, InputValueError, InputValueResult, Value};
 
-impl<T: Type + Zeroize> Type for Secret<T> {
+impl<T: InputType + Zeroize> InputType for Secret<T> {
+    type RawValueType = T::RawValueType;
+
     fn type_name() -> Cow<'static, str> {
         T::type_name()
     }
@@ -16,9 +18,7 @@ impl<T: Type + Zeroize> Type for Secret<T> {
     fn create_type_info(registry: &mut registry::Registry) -> String {
         T::create_type_info(registry)
     }
-}
 
-impl<T: InputType + Zeroize> InputType for Secret<T> {
     fn parse(value: Option<Value>) -> InputValueResult<Self> {
         T::parse(value)
             .map(Secret::new)
@@ -27,5 +27,9 @@ impl<T: InputType + Zeroize> InputType for Secret<T> {
 
     fn to_value(&self) -> Value {
         Value::Null
+    }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        self.expose_secret().as_raw_value()
     }
 }

@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::parser::types::{ExecutableDocument, FragmentDefinition, FragmentSpread};
-use crate::validation::visitor::{RuleError, Visitor, VisitorContext};
-use crate::{Name, Pos, Positioned};
+use crate::{
+    parser::types::{ExecutableDocument, FragmentDefinition, FragmentSpread},
+    validation::visitor::{RuleError, Visitor, VisitorContext},
+    Name, Pos, Positioned,
+};
 
 struct CycleDetector<'a> {
     visited: HashSet<&'a str>,
@@ -34,7 +36,6 @@ impl<'a> CycleDetector<'a> {
                 self.errors.push(RuleError::new(
                     vec![err_pos],
                     format!("Cannot spread fragment \"{}\"", name),
-                    None,
                 ));
             } else if !self.visited.contains(name) {
                 path.push((name, *pos));

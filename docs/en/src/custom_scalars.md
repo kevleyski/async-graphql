@@ -4,9 +4,10 @@ In `Async-graphql` most common scalar types are built in, but you can also creat
 
 Using `async-graphql::Scalar`, you can add support for a scalar when you implement it. You only need to implement parsing and output functions.
 
-The following example defines a 64-bit integer scalar where its input and output are strings. (Note: `Async-graphql` already supports 64-bit integers and uses strings as input and output.)
+The following example defines a 64-bit integer scalar where its input and output are strings.
 
 ```rust
+# extern crate async_graphql;
 use async_graphql::*;
 
 struct StringNumber(i64);
@@ -34,6 +35,11 @@ impl ScalarType for StringNumber {
 If your type implemented `serde::Serialize` and `serde::Deserialize`, then you can use this macro to define a scalar more simply.
 
 ```rust
+# extern crate async_graphql;
+# extern crate serde;
+# use async_graphql::*;
+# use serde::{Serialize, Deserialize};
+# use std::collections::HashMap;
 #[derive(Serialize, Deserialize)]
 struct MyValue {
     a: i32,

@@ -1,5 +1,17 @@
-use super::*;
 use async_graphql_value::Name;
+
+use super::*;
+
+const MAX_RECURSION_DEPTH: usize = 64;
+
+macro_rules! recursion_depth {
+    ($remaining_depth:ident) => {{
+        if $remaining_depth == 0 {
+            return Err(Error::RecursionLimitExceeded);
+        }
+        $remaining_depth - 1
+    }};
+}
 
 /// Parse a GraphQL query document.
 ///
@@ -9,13 +21,8 @@ use async_graphql_value::Name;
 pub fn parse_query<T: AsRef<str>>(input: T) -> Result<ExecutableDocument> {
     let mut pc = PositionCalculator::new(input.as_ref());
 
-    let items = parse_definition_items(
-        exactly_one(GraphQLParser::parse(
-            Rule::executable_document,
-            input.as_ref(),
-        )?),
-        &mut pc,
-    )?;
+    let pairs = GraphQLParser::parse(Rule::executable_document, input.as_ref())?;
+    let items = parse_definition_items(exactly_one(pairs), &mut pc)?;
 
     let mut operations = None;
     let mut fragments: HashMap<_, Positioned<FragmentDefinition>> = HashMap::new();
@@ -148,7 +155,7 @@ fn parse_operation_definition_item(
                     ty: OperationType::Query,
                     variable_definitions: Vec::new(),
                     directives: Vec::new(),
-                    selection_set: parse_selection_set(pair, pc)?,
+                    selection_set: parse_selection_set(pair, pc, MAX_RECURSION_DEPTH)?,
                 },
             },
             _ => unreachable!(),
@@ -171,7 +178,7 @@ fn parse_named_operation_definition(
         parse_variable_definitions(pair, pc)
     })?;
     let directives = parse_opt_directives(&mut pairs, pc)?;
-    let selection_set = parse_selection_set(pairs.next().unwrap(), pc)?;
+    let selection_set = parse_selection_set(pairs.next().unwrap(), pc, MAX_RECURSION_DEPTH)?;
 
     debug_assert_eq!(pairs.next(), None);
 
@@ -208,6 +215,8 @@ fn parse_variable_definition(
 
     let variable = parse_variable(pairs.next().unwrap(), pc)?;
     let var_type = parse_type(pairs.next().unwrap(), pc)?;
+
+    let directives = parse_opt_directives(&mut pairs, pc)?;
     let default_value = parse_if_rule(&mut pairs, Rule::default_value, |pair| {
         parse_default_value(pair, pc)
     })?;
@@ -218,6 +227,7 @@ fn parse_variable_definition(
         VariableDefinition {
             name: variable,
             var_type,
+            directives,
             default_value,
         },
         pos,
@@ -227,6 +237,7 @@ fn parse_variable_definition(
 fn parse_selection_set(
     pair: Pair<Rule>,
     pc: &mut PositionCalculator,
+    remaining_depth: usize,
 ) -> Result<Positioned<SelectionSet>> {
     debug_assert_eq!(pair.as_rule(), Rule::selection_set);
 
@@ -236,14 +247,18 @@ fn parse_selection_set(
         SelectionSet {
             items: pair
                 .into_inner()
-                .map(|pair| parse_selection(pair, pc))
+                .map(|pair| parse_selection(pair, pc, remaining_depth))
                 .collect::<Result<_>>()?,
         },
         pos,
     ))
 }
 
-fn parse_selection(pair: Pair<Rule>, pc: &mut PositionCalculator) -> Result<Positioned<Selection>> {
+fn parse_selection(
+    pair: Pair<Rule>,
+    pc: &mut PositionCalculator,
+    remaining_depth: usize,
+) -> Result<Positioned<Selection>> {
     debug_assert_eq!(pair.as_rule(), Rule::selection);
 
     let pos = pc.step(&pair);
@@ -251,16 +266,22 @@ fn parse_selection(pair: Pair<Rule>, pc: &mut PositionCalculator) -> Result<Posi
 
     Ok(Positioned::new(
         match pair.as_rule() {
-            Rule::field => Selection::Field(parse_field(pair, pc)?),
+            Rule::field => Selection::Field(parse_field(pair, pc, remaining_depth)?),
             Rule::fragment_spread => Selection::FragmentSpread(parse_fragment_spread(pair, pc)?),
-            Rule::inline_fragment => Selection::InlineFragment(parse_inline_fragment(pair, pc)?),
+            Rule::inline_fragment => {
+                Selection::InlineFragment(parse_inline_fragment(pair, pc, remaining_depth)?)
+            }
             _ => unreachable!(),
         },
         pos,
     ))
 }
 
-fn parse_field(pair: Pair<Rule>, pc: &mut PositionCalculator) -> Result<Positioned<Field>> {
+fn parse_field(
+    pair: Pair<Rule>,
+    pc: &mut PositionCalculator,
+    remaining_depth: usize,
+) -> Result<Positioned<Field>> {
     debug_assert_eq!(pair.as_rule(), Rule::field);
 
     let pos = pc.step(&pair);
@@ -273,7 +294,7 @@ fn parse_field(pair: Pair<Rule>, pc: &mut PositionCalculator) -> Result<Position
     })?;
     let directives = parse_opt_directives(&mut pairs, pc)?;
     let selection_set = parse_if_rule(&mut pairs, Rule::selection_set, |pair| {
-        parse_selection_set(pair, pc)
+        parse_selection_set(pair, pc, recursion_depth!(remaining_depth))
     })?;
 
     debug_assert_eq!(pairs.next(), None);
@@ -321,6 +342,7 @@ fn parse_fragment_spread(
 fn parse_inline_fragment(
     pair: Pair<Rule>,
     pc: &mut PositionCalculator,
+    remaining_depth: usize,
 ) -> Result<Positioned<InlineFragment>> {
     debug_assert_eq!(pair.as_rule(), Rule::inline_fragment);
 
@@ -331,7 +353,8 @@ fn parse_inline_fragment(
         parse_type_condition(pair, pc)
     })?;
     let directives = parse_opt_directives(&mut pairs, pc)?;
-    let selection_set = parse_selection_set(pairs.next().unwrap(), pc)?;
+    let selection_set =
+        parse_selection_set(pairs.next().unwrap(), pc, recursion_depth!(remaining_depth))?;
 
     debug_assert_eq!(pairs.next(), None);
 
@@ -362,7 +385,7 @@ fn parse_fragment_definition_item(
     let name = parse_name(pairs.next().unwrap(), pc)?;
     let type_condition = parse_type_condition(pairs.next().unwrap(), pc)?;
     let directives = parse_opt_directives(&mut pairs, pc)?;
-    let selection_set = parse_selection_set(pairs.next().unwrap(), pc)?;
+    let selection_set = parse_selection_set(pairs.next().unwrap(), pc, MAX_RECURSION_DEPTH)?;
 
     debug_assert_eq!(pairs.next(), None);
 
@@ -396,8 +419,9 @@ fn parse_type_condition(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
 
     #[test]
     fn test_parser() {

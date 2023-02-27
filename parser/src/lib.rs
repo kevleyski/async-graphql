@@ -7,17 +7,18 @@
 #![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::needless_question_mark)]
+#![allow(clippy::uninlined_format_args)]
 #![forbid(unsafe_code)]
 
-use crate::types::OperationType;
-use async_graphql_value::Name;
-use pest::error::LineColLocation;
-use pest::RuleType;
-use serde::{Serialize, Serializer};
 use std::fmt::{self, Display, Formatter};
 
+use async_graphql_value::Name;
 pub use parse::{parse_query, parse_schema};
+use pest::{error::LineColLocation, RuleType};
 pub use pos::{Pos, Positioned};
+use serde::{Serialize, Serializer};
+
+use crate::types::OperationType;
 
 pub mod types;
 
@@ -78,6 +79,8 @@ pub enum Error {
     },
     /// The document does not contain any operation.
     MissingOperation,
+    /// Recursion limit exceeded.
+    RecursionLimitExceeded,
 }
 
 impl Error {
@@ -106,6 +109,7 @@ impl Error {
                 ErrorPositions::new_2(*second, *first)
             }
             Self::MissingOperation => ErrorPositions::new_0(),
+            Self::RecursionLimitExceeded => ErrorPositions::new_0(),
         }
     }
 }
@@ -126,6 +130,7 @@ impl Display for Error {
                 write!(f, "fragment {} is defined twice", fragment)
             }
             Self::MissingOperation => f.write_str("document does not contain an operation"),
+            Self::RecursionLimitExceeded => f.write_str("recursion limit exceeded."),
         }
     }
 }

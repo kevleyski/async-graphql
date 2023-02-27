@@ -1,10 +1,12 @@
 use async_graphql_parser::types::{ExecutableDocument, OperationDefinition, VariableDefinition};
 use async_graphql_value::Name;
 
-use crate::parser::types::Field;
-use crate::registry::{ComplexityType, MetaType, MetaTypeName};
-use crate::validation::visitor::{VisitMode, Visitor, VisitorContext};
-use crate::Positioned;
+use crate::{
+    parser::types::Field,
+    registry::{ComplexityType, MetaType, MetaTypeName},
+    validation::visitor::{VisitMode, Visitor, VisitorContext},
+    Positioned,
+};
 
 pub struct ComplexityCalculate<'ctx, 'a> {
     pub complexity: &'a mut usize,
@@ -61,18 +63,16 @@ impl<'ctx, 'a> Visitor<'ctx> for ComplexityCalculate<'ctx, 'a> {
                             *self.complexity_stack.last_mut().unwrap() += n;
                         }
                         ComplexityType::Fn(f) => {
-                            if MetaTypeName::create(&meta_field.ty).is_list() {
-                                match f(
-                                    ctx,
-                                    self.variable_definition.unwrap(),
-                                    &field.node,
-                                    children_complex,
-                                ) {
-                                    Ok(n) => {
-                                        *self.complexity_stack.last_mut().unwrap() += n;
-                                    }
-                                    Err(err) => ctx.report_error(vec![field.pos], err.to_string()),
+                            match f(
+                                ctx,
+                                self.variable_definition.unwrap(),
+                                &field.node,
+                                children_complex,
+                            ) {
+                                Ok(n) => {
+                                    *self.complexity_stack.last_mut().unwrap() += n;
                                 }
+                                Err(err) => ctx.report_error(vec![field.pos], err.to_string()),
                             }
                         }
                     }
@@ -88,11 +88,14 @@ impl<'ctx, 'a> Visitor<'ctx> for ComplexityCalculate<'ctx, 'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::parser::parse_query;
-    use crate::validation::{visit, VisitorContext};
-    use crate::{EmptyMutation, Object, Schema, Subscription};
     use futures_util::stream::BoxStream;
+
+    use super::*;
+    use crate::{
+        parser::parse_query,
+        validation::{visit, VisitorContext},
+        EmptyMutation, Object, Schema, Subscription,
+    };
 
     struct Query;
 
@@ -123,6 +126,11 @@ mod tests {
         }
 
         async fn obj(&self) -> MyObj {
+            todo!()
+        }
+
+        #[graphql(complexity = "5 * child_complexity")]
+        async fn obj2(&self) -> MyObj {
             todo!()
         }
 
@@ -166,7 +174,8 @@ mod tests {
     }
 
     fn check_complex(query: &str, expect_complex: usize) {
-        let registry = Schema::<Query, EmptyMutation, Subscription>::create_registry();
+        let registry =
+            Schema::<Query, EmptyMutation, Subscription>::create_registry(Default::default());
         let doc = parse_query(query).unwrap();
         let mut ctx = VisitorContext::new(&registry, &doc, None);
         let mut complex = 0;
@@ -402,6 +411,14 @@ mod tests {
             }
         }"#,
             20,
+        );
+
+        check_complex(
+            r#"
+            query {
+                obj2 { a b }
+            }"#,
+            10,
         );
     }
 }

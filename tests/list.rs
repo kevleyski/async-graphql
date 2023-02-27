@@ -1,6 +1,11 @@
+#![allow(clippy::uninlined_format_args)]
+
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashSet, LinkedList, VecDeque},
+};
+
 use async_graphql::*;
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashSet, LinkedList, VecDeque};
 
 #[tokio::test]
 pub async fn test_list_type() {
@@ -118,10 +123,10 @@ pub async fn test_list_type() {
 
 #[tokio::test]
 pub async fn test_array_type() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn values(&self) -> [i32; 6] {
             [1, 2, 3, 4, 5, 6]
         }
@@ -132,7 +137,7 @@ pub async fn test_array_type() {
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
 
     assert_eq!(
         schema
@@ -167,6 +172,7 @@ pub async fn test_array_type() {
         vec![ServerError {
             message: r#"Failed to parse "[Int!]": Expected input type "[Int; 6]", found [Int; 5]."#
                 .to_owned(),
+            source: None,
             locations: vec![Pos {
                 line: 1,
                 column: 22,

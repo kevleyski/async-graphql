@@ -1,49 +1,125 @@
+use std::str::FromStr;
+
 use darling::ast::Data;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::ext::IdentExt;
-use syn::Error;
+use syn::{ext::IdentExt, visit::Visit, Error, Ident, LifetimeDef, Path, Type};
 
-use crate::args::{self, RenameRuleExt, RenameTarget};
-use crate::utils::{
-    gen_deprecation, generate_guards, get_crate_name, get_rustdoc, visible_fn, GeneratorResult,
+use crate::{
+    args::{self, RenameRuleExt, RenameTarget, SimpleObjectField},
+    utils::{
+        gen_deprecation, generate_guards, get_crate_name, get_rustdoc, visible_fn, GeneratorResult,
+    },
 };
+
+#[derive(Debug)]
+struct DerivedFieldMetadata {
+    ident: Ident,
+    into: Type,
+    owned: Option<bool>,
+    with: Option<Path>,
+}
+
+struct SimpleObjectFieldGenerator<'a> {
+    field: &'a SimpleObjectField,
+    derived: Option<DerivedFieldMetadata>,
+}
 
 pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_name(object_args.internal);
     let ident = &object_args.ident;
     let (impl_generics, ty_generics, where_clause) = object_args.generics.split_for_impl();
     let extends = object_args.extends;
-    let gql_typename = object_args
-        .name
-        .clone()
-        .unwrap_or_else(|| RenameTarget::Type.rename(ident.to_string()));
+    let shareable = object_args.shareable;
+    let inaccessible = object_args.inaccessible;
+    let tags = object_args
+        .tags
+        .iter()
+        .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
+        .collect::<Vec<_>>();
+    let gql_typename = if !object_args.name_type {
+        object_args
+            .name
+            .as_ref()
+            .map(|name| quote!(::std::borrow::Cow::Borrowed(#name)))
+            .unwrap_or_else(|| {
+                let name = RenameTarget::Type.rename(ident.to_string());
+                quote!(::std::borrow::Cow::Borrowed(#name))
+            })
+    } else {
+        quote!(<Self as #crate_name::TypeName>::type_name())
+    };
 
     let desc = get_rustdoc(&object_args.attrs)?
-        .map(|s| quote! { ::std::option::Option::Some(#s) })
+        .map(|s| quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#s)) })
         .unwrap_or_else(|| quote! {::std::option::Option::None});
 
     let s = match &object_args.data {
         Data::Struct(e) => e,
         _ => {
-            return Err(Error::new_spanned(
-                &ident,
-                "SimpleObject can only be applied to an struct.",
+            return Err(
+                Error::new_spanned(ident, "SimpleObject can only be applied to an struct.").into(),
             )
-            .into())
         }
     };
     let mut getters = Vec::new();
     let mut resolvers = Vec::new();
     let mut schema_fields = Vec::new();
 
+    let mut processed_fields: Vec<SimpleObjectFieldGenerator> = vec![];
+
+    // Before processing the fields, we generate the derivated fields
     for field in &s.fields {
-        if field.skip {
+        processed_fields.push(SimpleObjectFieldGenerator {
+            field,
+            derived: None,
+        });
+
+        for derived in &field.derived {
+            if derived.name.is_some() && derived.into.is_some() {
+                let name = derived.name.clone().unwrap();
+                let into = match syn::parse2::<Type>(
+                    proc_macro2::TokenStream::from_str(&derived.into.clone().unwrap()).unwrap(),
+                ) {
+                    Ok(e) => e,
+                    _ => {
+                        return Err(Error::new_spanned(
+                            &name,
+                            "derived into must be a valid type.",
+                        )
+                        .into());
+                    }
+                };
+
+                let derived = DerivedFieldMetadata {
+                    ident: name,
+                    into,
+                    owned: derived.owned,
+                    with: derived.with.clone(),
+                };
+
+                processed_fields.push(SimpleObjectFieldGenerator {
+                    field,
+                    derived: Some(derived),
+                })
+            }
+        }
+    }
+
+    for SimpleObjectFieldGenerator { field, derived } in &processed_fields {
+        if field.skip || field.skip_output {
             continue;
         }
-        let ident = match &field.ident {
+
+        let base_ident = match &field.ident {
             Some(ident) => ident,
-            None => return Err(Error::new_spanned(&ident, "All fields must be named.").into()),
+            None => return Err(Error::new_spanned(ident, "All fields must be named.").into()),
+        };
+
+        let ident = if let Some(derived) = derived {
+            &derived.ident
+        } else {
+            base_ident
         };
 
         let field_name = field.name.clone().unwrap_or_else(|| {
@@ -52,24 +128,56 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                 .rename(ident.unraw().to_string(), RenameTarget::Field)
         });
         let field_desc = get_rustdoc(&field.attrs)?
-            .map(|s| quote! {::std::option::Option::Some(#s)})
+            .map(|s| quote! {::std::option::Option::Some(::std::string::ToString::to_string(#s))})
             .unwrap_or_else(|| quote! {::std::option::Option::None});
         let field_deprecation = gen_deprecation(&field.deprecation, &crate_name);
         let external = field.external;
+        let shareable = field.shareable;
+        let inaccessible = field.inaccessible;
+        let tags = field
+            .tags
+            .iter()
+            .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
+            .collect::<Vec<_>>();
+        let override_from = match &field.override_from {
+            Some(from) => {
+                quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#from)) }
+            }
+            None => quote! { ::std::option::Option::None },
+        };
         let requires = match &field.requires {
-            Some(requires) => quote! { ::std::option::Option::Some(#requires) },
+            Some(requires) => {
+                quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#requires)) }
+            }
             None => quote! { ::std::option::Option::None },
         };
         let provides = match &field.provides {
-            Some(provides) => quote! { ::std::option::Option::Some(#provides) },
+            Some(provides) => {
+                quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#provides)) }
+            }
             None => quote! { ::std::option::Option::None },
         };
         let vis = &field.vis;
-        let ty = &field.ty;
+
+        let ty = if let Some(derived) = derived {
+            &derived.into
+        } else {
+            &field.ty
+        };
+
+        let owned = if let Some(derived) = derived {
+            derived.owned.unwrap_or(field.owned)
+        } else {
+            field.owned
+        };
 
         let cache_control = {
             let public = field.cache_control.is_public();
-            let max_age = field.cache_control.max_age;
+            let max_age = if field.cache_control.no_cache {
+                -1
+            } else {
+                field.cache_control.max_age as i32
+            };
             quote! {
                 #crate_name::CacheControl {
                     public: #public,
@@ -80,64 +188,102 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
 
         let visible = visible_fn(&field.visible);
 
-        schema_fields.push(quote! {
-            fields.insert(::std::borrow::ToOwned::to_owned(#field_name), #crate_name::registry::MetaField {
-                name: ::std::borrow::ToOwned::to_owned(#field_name),
-                description: #field_desc,
-                args: ::std::default::Default::default(),
-                ty: <#ty as #crate_name::Type>::create_type_info(registry),
-                deprecation: #field_deprecation,
-                cache_control: #cache_control,
-                external: #external,
-                provides: #provides,
-                requires: #requires,
-                visible: #visible,
-                compute_complexity: ::std::option::Option::None,
+        if !field.flatten {
+            schema_fields.push(quote! {
+                fields.insert(::std::borrow::ToOwned::to_owned(#field_name), #crate_name::registry::MetaField {
+                    name: ::std::borrow::ToOwned::to_owned(#field_name),
+                    description: #field_desc,
+                    args: ::std::default::Default::default(),
+                    ty: <#ty as #crate_name::OutputType>::create_type_info(registry),
+                    deprecation: #field_deprecation,
+                    cache_control: #cache_control,
+                    external: #external,
+                    provides: #provides,
+                    requires: #requires,
+                    shareable: #shareable,
+                    inaccessible: #inaccessible,
+                    tags: ::std::vec![ #(#tags),* ],
+                    override_from: #override_from,
+                    visible: #visible,
+                    compute_complexity: ::std::option::Option::None,
+                });
             });
-        });
+        } else {
+            schema_fields.push(quote! {
+                <#ty as #crate_name::OutputType>::create_type_info(registry);
+                if let #crate_name::registry::MetaType::Object { fields: obj_fields, .. } =
+                    registry.create_fake_output_type::<#ty>() {
+                    fields.extend(obj_fields);
+                }
+            });
+        }
 
-        let guard = match &field.guard {
-            Some(meta) => generate_guards(&crate_name, meta)?,
+        let guard_map_err = quote! {
+            .map_err(|err| err.into_server_error(ctx.item.pos))
+        };
+        let guard = match field.guard.as_ref().or(object_args.guard.as_ref()) {
+            Some(code) => Some(generate_guards(&crate_name, code, guard_map_err)?),
             None => None,
         };
-        let guard = guard.map(
-            |guard| quote! { #guard.check(ctx).await.map_err(|err| err.into_server_error(ctx.item.pos))?; },
-        );
 
-        getters.push(if !field.owned {
-            quote! {
+        let with_function = derived.as_ref().and_then(|x| x.with.as_ref());
+
+        let mut block = match !owned {
+            true => quote! {
+                &self.#base_ident
+            },
+            false => quote! {
+                ::std::clone::Clone::clone(&self.#base_ident)
+            },
+        };
+
+        block = match (derived, with_function) {
+            (Some(_), Some(with)) => quote! {
+                #with(#block)
+            },
+            (Some(_), None) => quote! {
+                ::std::convert::Into::into(#block)
+            },
+            (_, _) => block,
+        };
+
+        let ty = match !owned {
+            true => quote! { &#ty },
+            false => quote! { #ty },
+        };
+
+        if !field.flatten {
+            getters.push(quote! {
                  #[inline]
                  #[allow(missing_docs)]
-                 #vis async fn #ident(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::Result<&#ty> {
-                     ::std::result::Result::Ok(&self.#ident)
+                 #vis async fn #ident(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::Result<#ty> {
+                     ::std::result::Result::Ok(#block)
                  }
-            }
-        } else {
-            quote! {
-                #[inline]
-                #[allow(missing_docs)]
-                #vis async fn #ident(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::Result<#ty> {
-                    ::std::result::Result::Ok(::std::clone::Clone::clone(&self.#ident))
-                }
-            }
-        });
+            });
 
-        resolvers.push(quote! {
-            if ctx.item.node.name.node == #field_name {
-                let f = async move {
-                    #guard
-                    self.#ident(ctx).await.map_err(|err| err.into_server_error(ctx.item.pos))
-                };
-                let obj = f.await.map_err(|err| ctx.set_error_path(err))?;
-                let ctx_obj = ctx.with_selection_set(&ctx.item.node.selection_set);
-                return #crate_name::OutputType::resolve(&obj, &ctx_obj, ctx.item).await.map(::std::option::Option::Some);
-            }
-        });
+            resolvers.push(quote! {
+                if ctx.item.node.name.node == #field_name {
+                    let f = async move {
+                        #guard
+                        self.#ident(ctx).await.map_err(|err| err.into_server_error(ctx.item.pos))
+                    };
+                    let obj = f.await.map_err(|err| ctx.set_error_path(err))?;
+                    let ctx_obj = ctx.with_selection_set(&ctx.item.node.selection_set);
+                    return #crate_name::OutputType::resolve(&obj, &ctx_obj, ctx.item).await.map(::std::option::Option::Some);
+                }
+            });
+        } else {
+            resolvers.push(quote! {
+                if let ::std::option::Option::Some(value) = #crate_name::ContainerType::resolve_field(&self.#ident, ctx).await? {
+                    return ::std::result::Result::Ok(std::option::Option::Some(value));
+                }
+            });
+        }
     }
 
-    if !object_args.dummy && resolvers.is_empty() {
+    if !object_args.fake && resolvers.is_empty() {
         return Err(Error::new_spanned(
-            &ident,
+            ident,
             "A GraphQL Object type must define one or more fields.",
         )
         .into());
@@ -145,7 +291,11 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
 
     let cache_control = {
         let public = object_args.cache_control.is_public();
-        let max_age = object_args.cache_control.max_age;
+        let max_age = if object_args.cache_control.no_cache {
+            -1
+        } else {
+            object_args.cache_control.max_age as i32
+        };
         quote! {
             #crate_name::CacheControl {
                 public: #public,
@@ -184,30 +334,6 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             }
 
             #[allow(clippy::all, clippy::pedantic)]
-            impl #impl_generics #crate_name::Type for #ident #ty_generics #where_clause {
-                fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
-                    ::std::borrow::Cow::Borrowed(#gql_typename)
-                }
-
-                fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
-                    registry.create_type::<Self, _>(|registry| #crate_name::registry::MetaType::Object {
-                        name: ::std::borrow::ToOwned::to_owned(#gql_typename),
-                        description: #desc,
-                        fields: {
-                            let mut fields = #crate_name::indexmap::IndexMap::new();
-                            #(#schema_fields)*
-                            #concat_complex_fields
-                            fields
-                        },
-                        cache_control: #cache_control,
-                        extends: #extends,
-                        keys: ::std::option::Option::None,
-                        visible: #visible,
-                    })
-                }
-            }
-
-            #[allow(clippy::all, clippy::pedantic)]
             #[#crate_name::async_trait::async_trait]
 
             impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
@@ -221,6 +347,32 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             #[allow(clippy::all, clippy::pedantic)]
             #[#crate_name::async_trait::async_trait]
             impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
+                fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                    #gql_typename
+                }
+
+                fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
+                    registry.create_output_type::<Self, _>(#crate_name::registry::MetaTypeId::Object, |registry| #crate_name::registry::MetaType::Object {
+                        name: ::std::borrow::Cow::into_owned(#gql_typename),
+                        description: #desc,
+                        fields: {
+                            let mut fields = #crate_name::indexmap::IndexMap::new();
+                            #(#schema_fields)*
+                            #concat_complex_fields
+                            fields
+                        },
+                        cache_control: #cache_control,
+                        extends: #extends,
+                        shareable: #shareable,
+                        inaccessible: #inaccessible,
+                        tags: ::std::vec![ #(#tags),* ],
+                        keys: ::std::option::Option::None,
+                        visible: #visible,
+                        is_subscription: false,
+                        rust_typename: ::std::option::Option::Some(::std::any::type_name::<Self>()),
+                    })
+                }
+
                 async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
                     #resolve_container
                 }
@@ -231,6 +383,33 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
     } else {
         let mut code = Vec::new();
 
+        #[derive(Default)]
+        struct GetLifetimes<'a> {
+            lifetimes: Vec<&'a LifetimeDef>,
+        }
+
+        impl<'a> Visit<'a> for GetLifetimes<'a> {
+            fn visit_lifetime_def(&mut self, i: &'a LifetimeDef) {
+                self.lifetimes.push(i);
+            }
+        }
+
+        let mut visitor = GetLifetimes::default();
+        visitor.visit_generics(&object_args.generics);
+        let lifetimes = visitor.lifetimes;
+
+        let def_lifetimes = if !lifetimes.is_empty() {
+            Some(quote!(<#(#lifetimes),*>))
+        } else {
+            None
+        };
+
+        let type_lifetimes = if !lifetimes.is_empty() {
+            Some(quote!(#(#lifetimes,)*))
+        } else {
+            None
+        };
+
         code.push(quote! {
             impl #impl_generics #ident #ty_generics #where_clause {
                 #(#getters)*
@@ -240,7 +419,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                     name: &str,
                     complex_fields: #crate_name::indexmap::IndexMap<::std::string::String, #crate_name::registry::MetaField>,
                 ) -> ::std::string::String where Self: #crate_name::OutputType {
-                    registry.create_type::<Self, _>(|registry| #crate_name::registry::MetaType::Object {
+                    registry.create_output_type::<Self, _>(#crate_name::registry::MetaTypeId::Object, |registry| #crate_name::registry::MetaType::Object {
                         name: ::std::borrow::ToOwned::to_owned(name),
                         description: #desc,
                         fields: {
@@ -251,8 +430,13 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                         },
                         cache_control: #cache_control,
                         extends: #extends,
+                        shareable: #shareable,
+                        inaccessible: #inaccessible,
+                        tags: ::std::vec![ #(#tags),* ],
                         keys: ::std::option::Option::None,
                         visible: #visible,
+                        is_subscription: false,
+                        rust_typename: ::std::option::Option::Some(::std::any::type_name::<Self>()),
                     })
                 }
 
@@ -266,11 +450,21 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         for concrete in &object_args.concretes {
             let gql_typename = &concrete.name;
             let params = &concrete.params.0;
-            let concrete_type = quote! { #ident<#(#params),*> };
+            let concrete_type = quote! { #ident<#type_lifetimes #(#params),*> };
 
             let expanded = quote! {
                 #[allow(clippy::all, clippy::pedantic)]
-                impl #crate_name::Type for #concrete_type {
+                #[#crate_name::async_trait::async_trait]
+                impl #def_lifetimes #crate_name::resolver_utils::ContainerType for #concrete_type {
+                    async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+                        #complex_resolver
+                        self.__internal_resolve_field(ctx).await
+                    }
+                }
+
+                #[allow(clippy::all, clippy::pedantic)]
+                #[#crate_name::async_trait::async_trait]
+                impl #def_lifetimes #crate_name::OutputType for #concrete_type {
                     fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                         ::std::borrow::Cow::Borrowed(#gql_typename)
                     }
@@ -280,26 +474,13 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                         #concat_complex_fields
                         Self::__internal_create_type_info(registry, #gql_typename, fields)
                     }
-                }
 
-                #[allow(clippy::all, clippy::pedantic)]
-                #[#crate_name::async_trait::async_trait]
-                impl #crate_name::resolver_utils::ContainerType for #concrete_type {
-                    async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                        #complex_resolver
-                        self.__internal_resolve_field(ctx).await
-                    }
-                }
-
-                #[allow(clippy::all, clippy::pedantic)]
-                #[#crate_name::async_trait::async_trait]
-                impl #crate_name::OutputType for #concrete_type {
                     async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
                         #resolve_container
                     }
                 }
 
-                impl #crate_name::ObjectType for #concrete_type {}
+                impl #def_lifetimes #crate_name::ObjectType for #concrete_type {}
             };
             code.push(expanded);
         }

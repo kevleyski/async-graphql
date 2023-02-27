@@ -1,15 +1,21 @@
-use proc_macro::TokenStream;
-use proc_macro2::Span;
-use quote::quote;
-use syn::ext::IdentExt;
-use syn::{Block, Error, Ident, ImplItem, ItemImpl, ReturnType};
+use std::{iter::FromIterator, str::FromStr};
 
-use crate::args::{self, ComplexityType, RenameRuleExt, RenameTarget};
-use crate::output_type::OutputType;
-use crate::utils::{
-    extract_input_args, gen_deprecation, generate_default, generate_guards, generate_validator,
-    get_cfg_attrs, get_crate_name, get_param_getter_ident, get_rustdoc, get_type_path_and_name,
-    parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs, visible_fn, GeneratorResult,
+use proc_macro::TokenStream;
+use proc_macro2::Ident;
+use quote::quote;
+use syn::{
+    ext::IdentExt, punctuated::Punctuated, Block, Error, FnArg, ImplItem, ItemImpl, Pat,
+    ReturnType, Token, Type, TypeReference,
+};
+
+use crate::{
+    args::{self, ComplexityType, RenameRuleExt, RenameTarget},
+    output_type::OutputType,
+    utils::{
+        extract_input_args, gen_deprecation, generate_default, generate_guards, get_cfg_attrs,
+        get_crate_name, get_rustdoc, get_type_path_and_name, parse_complexity_expr,
+        parse_graphql_attrs, remove_graphql_attrs, visible_fn, GeneratorResult,
+    },
 };
 
 pub fn generate(
@@ -18,21 +24,33 @@ pub fn generate(
 ) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_name(object_args.internal);
     let (self_ty, self_name) = get_type_path_and_name(item_impl.self_ty.as_ref())?;
-    let generics = &item_impl.generics;
-    let generics_params = &generics.params;
-    let where_clause = &item_impl.generics.where_clause;
+    let (impl_generics, _, where_clause) = item_impl.generics.split_for_impl();
     let extends = object_args.extends;
-    let gql_typename = object_args
-        .name
-        .clone()
-        .unwrap_or_else(|| RenameTarget::Type.rename(self_name.clone()));
-    let shadow_type = Ident::new(&format!("__Shadow{}", gql_typename), Span::call_site());
+    let shareable = object_args.shareable;
+    let inaccessible = object_args.inaccessible;
+    let tags = object_args
+        .tags
+        .iter()
+        .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
+        .collect::<Vec<_>>();
+    let gql_typename = if !object_args.name_type {
+        object_args
+            .name
+            .as_ref()
+            .map(|name| quote!(::std::borrow::Cow::Borrowed(#name)))
+            .unwrap_or_else(|| {
+                let name = RenameTarget::Type.rename(self_name.clone());
+                quote!(::std::borrow::Cow::Borrowed(#name))
+            })
+    } else {
+        quote!(<Self as #crate_name::TypeName>::type_name())
+    };
 
     let desc = if object_args.use_type_description {
-        quote! { ::std::option::Option::Some(<Self as #crate_name::Description>::description()) }
+        quote! { ::std::option::Option::Some(::std::string::ToString::to_string(<Self as #crate_name::Description>::description())) }
     } else {
         get_rustdoc(&item_impl.attrs)?
-            .map(|s| quote!(::std::option::Option::Some(#s)))
+            .map(|s| quote!(::std::option::Option::Some(::std::string::ToString::to_string(#s))))
             .unwrap_or_else(|| quote!(::std::option::Option::None))
     };
 
@@ -41,6 +59,91 @@ pub fn generate(
     let mut find_entities = Vec::new();
     let mut add_keys = Vec::new();
     let mut create_entity_types = Vec::new();
+
+    // Computation of the derivated fields
+    let mut derived_impls = vec![];
+    for item in &mut item_impl.items {
+        if let ImplItem::Method(method) = item {
+            let method_args: args::ObjectField =
+                parse_graphql_attrs(&method.attrs)?.unwrap_or_default();
+
+            for derived in method_args.derived {
+                if derived.name.is_some() && derived.into.is_some() {
+                    let base_function_name = &method.sig.ident;
+                    let name = derived.name.unwrap();
+                    let with = derived.with;
+                    let into = Type::Verbatim(
+                        proc_macro2::TokenStream::from_str(&derived.into.unwrap()).unwrap(),
+                    );
+
+                    let mut new_impl = method.clone();
+                    new_impl.sig.ident = name;
+                    new_impl.sig.output =
+                        syn::parse2::<ReturnType>(quote! { -> #crate_name::Result<#into> })
+                            .expect("invalid result type");
+
+                    let should_create_context = new_impl
+                        .sig
+                        .inputs
+                        .iter()
+                        .nth(1)
+                        .map(|x| {
+                            if let FnArg::Typed(pat) = x {
+                                if let Type::Reference(TypeReference { elem, .. }) = &*pat.ty {
+                                    if let Type::Path(path) = elem.as_ref() {
+                                        return path.path.segments.last().unwrap().ident
+                                            != "Context";
+                                    }
+                                }
+                            };
+                            true
+                        })
+                        .unwrap_or(true);
+
+                    if should_create_context {
+                        let arg_ctx = syn::parse2::<FnArg>(quote! { ctx: &Context<'_> })
+                            .expect("invalid arg type");
+                        new_impl.sig.inputs.insert(1, arg_ctx);
+                    }
+
+                    let other_atts: Punctuated<Ident, Token![,]> = Punctuated::from_iter(
+                        new_impl
+                            .sig
+                            .inputs
+                            .iter()
+                            .filter_map(|x| match x {
+                                FnArg::Typed(pat) => match &*pat.pat {
+                                    Pat::Ident(ident) => Some(Ok(ident.ident.clone())),
+                                    _ => Some(Err(Error::new_spanned(
+                                        pat,
+                                        "Must be a simple argument",
+                                    ))),
+                                },
+                                FnArg::Receiver(_) => None,
+                            })
+                            .collect::<Result<Vec<Ident>, Error>>()?
+                            .into_iter(),
+                    );
+
+                    let new_block = match with {
+                        Some(with) => quote!({
+                            ::std::result::Result::Ok(#with(#self_ty::#base_function_name(&self, #other_atts).await?))
+                        }),
+                        None => quote!({
+                            {
+                                ::std::result::Result::Ok(#self_ty::#base_function_name(&self, #other_atts).await?.into())
+                            }
+                        }),
+                    };
+
+                    new_impl.block = syn::parse2::<Block>(new_block).expect("invalid block");
+
+                    derived_impls.push(ImplItem::Method(new_impl));
+                }
+            }
+        }
+    }
+    item_impl.items.append(&mut derived_impls);
 
     for item in &mut item_impl.items {
         if let ImplItem::Method(method) = item {
@@ -54,7 +157,7 @@ pub fn generate(
                     return Err(Error::new_spanned(&method, "Must be asynchronous").into());
                 }
 
-                let args = extract_input_args(&crate_name, method)?;
+                let args = extract_input_args::<args::Argument>(&crate_name, method)?;
 
                 let ty = match &method.sig.output {
                     ReturnType::Type(_, ty) => OutputType::parse(ty)?,
@@ -94,7 +197,7 @@ pub fn generate(
                     if is_key {
                         get_federation_key.push(quote! {
                             if let Some(fields) = <#ty as #crate_name::InputType>::federation_fields() {
-                                key_str.push(format!("{} {}", #name, fields));                                
+                                key_str.push(format!("{} {}", #name, fields));
                             } else {
                                 key_str.push(#name.to_string());
                             }
@@ -123,11 +226,11 @@ pub fn generate(
                     {
                         let mut key_str = Vec::new();
                         #(#get_federation_key)*
-                        registry.add_keys(&<#entity_type as #crate_name::Type>::type_name(), &key_str.join(" "));
+                        registry.add_keys(&<#entity_type as #crate_name::OutputType>::type_name(), &key_str.join(" "));
                     }
                 });
                 create_entity_types.push(
-                    quote! { <#entity_type as #crate_name::Type>::create_type_info(registry); },
+                    quote! { <#entity_type as #crate_name::OutputType>::create_type_info(registry); },
                 );
 
                 let field_ident = &method.sig.ident;
@@ -154,7 +257,7 @@ pub fn generate(
                     args.len(),
                     quote! {
                         #(#cfg_attrs)*
-                        if typename == &<#entity_type as #crate_name::Type>::type_name() {
+                        if typename == &<#entity_type as #crate_name::OutputType>::type_name() {
                             if let (#(#key_pat),*) = (#(#key_getter),*) {
                                 let f = async move {
                                     #(#requires_getter)*
@@ -171,6 +274,43 @@ pub fn generate(
                 if method.sig.asyncness.is_none() {
                     return Err(Error::new_spanned(&method, "Must be asynchronous").into());
                 }
+                let cfg_attrs = get_cfg_attrs(&method.attrs);
+
+                if method_args.flatten {
+                    // Only used to inject the context placeholder if required.
+                    extract_input_args::<args::Argument>(&crate_name, method)?;
+
+                    let ty = match &method.sig.output {
+                        ReturnType::Type(_, ty) => OutputType::parse(ty)?,
+                        ReturnType::Default => {
+                            return Err(Error::new_spanned(
+                                &method.sig.output,
+                                "Flatten resolver must have a return type",
+                            )
+                            .into())
+                        }
+                    };
+                    let ty = ty.value_type();
+                    let ident = &method.sig.ident;
+
+                    schema_fields.push(quote! {
+                        <#ty>::create_type_info(registry);
+                        if let #crate_name::registry::MetaType::Object { fields: obj_fields, .. } =
+                            registry.create_fake_output_type::<#ty>() {
+                            fields.extend(obj_fields);
+                        }
+                    });
+
+                    resolvers.push(quote! {
+                        #(#cfg_attrs)*
+                        if let ::std::option::Option::Some(value) = #crate_name::ContainerType::resolve_field(&self.#ident(ctx).await, ctx).await? {
+                            return ::std::result::Result::Ok(std::option::Option::Some(value));
+                        }
+                    });
+
+                    remove_graphql_attrs(&mut method.attrs);
+                    continue;
+                }
 
                 let field_name = method_args.name.clone().unwrap_or_else(|| {
                     object_args
@@ -178,21 +318,42 @@ pub fn generate(
                         .rename(method.sig.ident.unraw().to_string(), RenameTarget::Field)
                 });
                 let field_desc = get_rustdoc(&method.attrs)?
-                    .map(|s| quote! { ::std::option::Option::Some(#s) })
+                    .map(|s| quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#s)) })
                     .unwrap_or_else(|| quote! {::std::option::Option::None});
                 let field_deprecation = gen_deprecation(&method_args.deprecation, &crate_name);
                 let external = method_args.external;
+                let shareable = method_args.shareable;
+                let inaccessible = method_args.inaccessible;
+                let tags = method_args
+                    .tags
+                    .iter()
+                    .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
+                    .collect::<Vec<_>>();
+                let override_from = match &method_args.override_from {
+                    Some(from) => {
+                        quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#from)) }
+                    }
+                    None => quote! { ::std::option::Option::None },
+                };
                 let requires = match &method_args.requires {
-                    Some(requires) => quote! { ::std::option::Option::Some(#requires) },
+                    Some(requires) => {
+                        quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#requires)) }
+                    }
                     None => quote! { ::std::option::Option::None },
                 };
                 let provides = match &method_args.provides {
-                    Some(provides) => quote! { ::std::option::Option::Some(#provides) },
+                    Some(provides) => {
+                        quote! { ::std::option::Option::Some(::std::string::ToString::to_string(#provides)) }
+                    }
                     None => quote! { ::std::option::Option::None },
                 };
                 let cache_control = {
                     let public = method_args.cache_control.is_public();
-                    let max_age = method_args.cache_control.max_age;
+                    let max_age = if method_args.cache_control.no_cache {
+                        -1
+                    } else {
+                        method_args.cache_control.max_age as i32
+                    };
                     quote! {
                         #crate_name::CacheControl {
                             public: #public,
@@ -200,22 +361,11 @@ pub fn generate(
                         }
                     }
                 };
-                let cfg_attrs = get_cfg_attrs(&method.attrs);
 
-                let args = extract_input_args(&crate_name, method)?;
+                let args = extract_input_args::<args::Argument>(&crate_name, method)?;
                 let mut schema_args = Vec::new();
                 let mut use_params = Vec::new();
                 let mut get_params = Vec::new();
-                let ty = match &method.sig.output {
-                    ReturnType::Type(_, ty) => OutputType::parse(ty)?,
-                    ReturnType::Default => {
-                        return Err(Error::new_spanned(
-                            &method.sig.output,
-                            "Resolver must have a return type",
-                        )
-                        .into())
-                    }
-                };
 
                 for (
                     ident,
@@ -225,9 +375,12 @@ pub fn generate(
                         desc,
                         default,
                         default_with,
+                        process_with,
                         validator,
                         visible,
                         secret,
+                        inaccessible,
+                        tags,
                         ..
                     },
                 ) in &args
@@ -239,7 +392,7 @@ pub fn generate(
                     });
                     let desc = desc
                         .as_ref()
-                        .map(|s| quote! {::std::option::Option::Some(#s)})
+                        .map(|s| quote! {::std::option::Option::Some(::std::string::ToString::to_string(#s))})
                         .unwrap_or_else(|| quote! {::std::option::Option::None});
                     let default = generate_default(default, default_with)?;
                     let schema_default = default
@@ -253,26 +406,24 @@ pub fn generate(
                         })
                         .unwrap_or_else(|| quote! {::std::option::Option::None});
 
-                    let validator = match &validator {
-                        Some(meta) => {
-                            let stream = generate_validator(&crate_name, meta)?;
-                            quote!(::std::option::Option::Some(#stream))
-                        }
-                        None => quote!(::std::option::Option::None),
-                    };
-
                     let visible = visible_fn(visible);
+                    let tags = tags
+                        .iter()
+                        .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
+                        .collect::<Vec<_>>();
+
                     schema_args.push(quote! {
-                        args.insert(#name, #crate_name::registry::MetaInputValue {
-                            name: #name,
-                            description: #desc,
-                            ty: <#ty as #crate_name::Type>::create_type_info(registry),
-                            default_value: #schema_default,
-                            validator: #validator,
-                            visible: #visible,
-                            is_secret: #secret,
+                            args.insert(::std::borrow::ToOwned::to_owned(#name), #crate_name::registry::MetaInputValue {
+                                name: ::std::string::ToString::to_string(#name),
+                                description: #desc,
+                                ty: <#ty as #crate_name::InputType>::create_type_info(registry),
+                                default_value: #schema_default,
+                                visible: #visible,
+                                inaccessible: #inaccessible,
+                                tags: ::std::vec![ #(#tags),* ],
+                                is_secret: #secret,
+                            });
                         });
-                    });
 
                     let param_ident = &ident.ident;
                     use_params.push(quote! { #param_ident });
@@ -283,18 +434,45 @@ pub fn generate(
                         }
                         None => quote! { ::std::option::Option::None },
                     };
-                    // We're generating a new identifier,
-                    // so remove the 'r#` prefix if present
-                    let param_getter_name =
-                        get_param_getter_ident(&ident.ident.unraw().to_string());
+
+                    let process_with = match process_with.as_ref() {
+                        Some(fn_path) => {
+                            let fn_path: syn::ExprPath = syn::parse_str(fn_path)?;
+                            quote! {
+                                #fn_path(&mut #param_ident);
+                            }
+                        }
+                        None => Default::default(),
+                    };
+
+                    let validators = validator.clone().unwrap_or_default().create_validators(
+                        &crate_name,
+                        quote!(&#ident),
+                        Some(quote!(.map_err(|err| err.into_server_error(__pos)))),
+                    )?;
+
+                    let mut non_mut_ident = ident.clone();
+                    non_mut_ident.mutability = None;
                     get_params.push(quote! {
-                        #[allow(non_snake_case)]
-                        let #param_getter_name = || -> #crate_name::ServerResult<#ty> { ctx.param_value(#name, #default) };
-                        #[allow(non_snake_case)]
-                        let #ident: #ty = #param_getter_name()?;
+                        #[allow(non_snake_case, unused_variables, unused_mut)]
+                        let (__pos, mut #non_mut_ident) = ctx.param_value::<#ty>(#name, #default)?;
+                        #process_with
+                        #validators
+                        #[allow(non_snake_case, unused_variables)]
+                        let #ident = #non_mut_ident;
                     });
                 }
 
+                let ty = match &method.sig.output {
+                    ReturnType::Type(_, ty) => OutputType::parse(ty)?,
+                    ReturnType::Default => {
+                        return Err(Error::new_spanned(
+                            &method.sig.output,
+                            "Resolver must have a return type",
+                        )
+                        .into())
+                    }
+                };
                 let schema_ty = ty.value_type();
                 let visible = visible_fn(&method_args.visible);
 
@@ -359,12 +537,16 @@ pub fn generate(
                             #(#schema_args)*
                             args
                         },
-                        ty: <#schema_ty as #crate_name::Type>::create_type_info(registry),
+                        ty: <#schema_ty as #crate_name::OutputType>::create_type_info(registry),
                         deprecation: #field_deprecation,
                         cache_control: #cache_control,
                         external: #external,
                         provides: #provides,
                         requires: #requires,
+                        shareable: #shareable,
+                        inaccessible: #inaccessible,
+                        tags: ::std::vec![ #(#tags),* ],
+                        override_from: #override_from,
                         visible: #visible,
                         compute_complexity: #complexity,
                     });
@@ -394,16 +576,13 @@ pub fn generate(
                     }
                 };
 
-                let guard = match &method_args.guard {
-                    Some(meta_list) => generate_guards(&crate_name, meta_list)?,
+                let guard_map_err = quote! {
+                    .map_err(|err| err.into_server_error(ctx.item.pos))
+                };
+                let guard = match method_args.guard.as_ref().or(object_args.guard.as_ref()) {
+                    Some(code) => Some(generate_guards(&crate_name, code, guard_map_err)?),
                     None => None,
                 };
-
-                let guard = guard.map(|guard| {
-                    quote! {
-                        #guard.check(ctx).await.map_err(|err| err.into_server_error(ctx.item.pos))?;
-                    }
-                });
 
                 resolvers.push(quote! {
                     #(#cfg_attrs)*
@@ -426,7 +605,11 @@ pub fn generate(
 
     let cache_control = {
         let public = object_args.cache_control.is_public();
-        let max_age = object_args.cache_control.max_age;
+        let max_age = if object_args.cache_control.no_cache {
+            -1
+        } else {
+            object_args.cache_control.max_age as i32
+        };
         quote! {
             #crate_name::CacheControl {
                 public: #public,
@@ -440,7 +623,7 @@ pub fn generate(
 
     if resolvers.is_empty() && create_entity_types.is_empty() {
         return Err(Error::new_spanned(
-            &self_ty,
+            self_ty,
             "A GraphQL Object type must define one or more fields.",
         )
         .into());
@@ -453,77 +636,181 @@ pub fn generate(
         quote! { #crate_name::resolver_utils::resolve_container(ctx, self).await }
     };
 
-    let expanded = quote! {
-        #item_impl
+    let expanded = if object_args.concretes.is_empty() {
+        quote! {
+            #item_impl
 
-        #[allow(non_snake_case)]
-        type #shadow_type<#generics_params> = #self_ty;
+            #[allow(clippy::all, clippy::pedantic, clippy::suspicious_else_formatting)]
+            #[allow(unused_braces, unused_variables, unused_parens, unused_mut)]
+            #[#crate_name::async_trait::async_trait]
+            impl #impl_generics #crate_name::resolver_utils::ContainerType for #self_ty #where_clause {
+                async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+                    #(#resolvers)*
+                    ::std::result::Result::Ok(::std::option::Option::None)
+                }
 
-        #[allow(clippy::all, clippy::pedantic)]
-        impl #generics #crate_name::Type for #shadow_type<#generics_params> #where_clause {
-            fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
-                ::std::borrow::Cow::Borrowed(#gql_typename)
+                async fn find_entity(&self, ctx: &#crate_name::Context<'_>, params: &#crate_name::Value) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+                    let params = match params {
+                        #crate_name::Value::Object(params) => params,
+                        _ => return ::std::result::Result::Ok(::std::option::Option::None),
+                    };
+                    let typename = if let ::std::option::Option::Some(#crate_name::Value::String(typename)) = params.get("__typename") {
+                        typename
+                    } else {
+                        return ::std::result::Result::Err(
+                            #crate_name::ServerError::new(r#""__typename" must be an existing string."#, ::std::option::Option::Some(ctx.item.pos))
+                        );
+                    };
+                    #(#find_entities_iter)*
+                    ::std::result::Result::Ok(::std::option::Option::None)
+                }
             }
 
-            fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
-                let ty = registry.create_type::<Self, _>(|registry| #crate_name::registry::MetaType::Object {
-                    name: ::std::borrow::ToOwned::to_owned(#gql_typename),
-                    description: #desc,
-                    fields: {
-                        let mut fields = #crate_name::indexmap::IndexMap::new();
-                        #(#schema_fields)*
-                        fields
-                    },
-                    cache_control: #cache_control,
-                    extends: #extends,
-                    keys: ::std::option::Option::None,
-                    visible: #visible,
-                });
-                #(#create_entity_types)*
-                #(#add_keys)*
-                ty
+            #[allow(clippy::all, clippy::pedantic)]
+            #[#crate_name::async_trait::async_trait]
+            impl #impl_generics #crate_name::OutputType for #self_ty #where_clause {
+                fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                    #gql_typename
+                }
+
+                fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
+                    let ty = registry.create_output_type::<Self, _>(#crate_name::registry::MetaTypeId::Object, |registry| #crate_name::registry::MetaType::Object {
+                        name: ::std::borrow::Cow::into_owned(#gql_typename),
+                        description: #desc,
+                        fields: {
+                            let mut fields = #crate_name::indexmap::IndexMap::new();
+                            #(#schema_fields)*
+                            fields
+                        },
+                        cache_control: #cache_control,
+                        extends: #extends,
+                        shareable: #shareable,
+                        inaccessible: #inaccessible,
+                        tags: ::std::vec![ #(#tags),* ],
+                        keys: ::std::option::Option::None,
+                        visible: #visible,
+                        is_subscription: false,
+                        rust_typename: ::std::option::Option::Some(::std::any::type_name::<Self>()),
+                    });
+                    #(#create_entity_types)*
+                    #(#add_keys)*
+                    ty
+                }
+
+                async fn resolve(
+                    &self,
+                    ctx: &#crate_name::ContextSelectionSet<'_>,
+                    _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
+                ) -> #crate_name::ServerResult<#crate_name::Value> {
+                    #resolve_container
+                }
             }
+
+            impl #impl_generics #crate_name::ObjectType for #self_ty #where_clause {}
+        }
+    } else {
+        let mut codes = Vec::new();
+
+        codes.push(quote! {
+            #item_impl
+
+            impl #impl_generics #self_ty #where_clause {
+                fn __internal_create_type_info(registry: &mut #crate_name::registry::Registry, name: &str) -> ::std::string::String  where Self: #crate_name::OutputType {
+                    let ty = registry.create_output_type::<Self, _>(#crate_name::registry::MetaTypeId::Object, |registry| #crate_name::registry::MetaType::Object {
+                        name: ::std::borrow::ToOwned::to_owned(name),
+                        description: #desc,
+                        fields: {
+                            let mut fields = #crate_name::indexmap::IndexMap::new();
+                            #(#schema_fields)*
+                            fields
+                        },
+                        cache_control: #cache_control,
+                        extends: #extends,
+                        shareable: #shareable,
+                        inaccessible: #inaccessible,
+                        tags: ::std::vec![ #(#tags),* ],
+                        keys: ::std::option::Option::None,
+                        visible: #visible,
+                        is_subscription: false,
+                        rust_typename: ::std::option::Option::Some(::std::any::type_name::<Self>()),
+                    });
+                    #(#create_entity_types)*
+                    #(#add_keys)*
+                    ty
+                }
+
+                async fn __internal_resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> where Self: #crate_name::ContainerType {
+                    #(#resolvers)*
+                    ::std::result::Result::Ok(::std::option::Option::None)
+                }
+
+                async fn __internal_find_entity(&self, ctx: &#crate_name::Context<'_>, params: &#crate_name::Value) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+                    let params = match params {
+                        #crate_name::Value::Object(params) => params,
+                        _ => return ::std::result::Result::Ok(::std::option::Option::None),
+                    };
+                    let typename = if let ::std::option::Option::Some(#crate_name::Value::String(typename)) = params.get("__typename") {
+                        typename
+                    } else {
+                        return ::std::result::Result::Err(
+                            #crate_name::ServerError::new(r#""__typename" must be an existing string."#, ::std::option::Option::Some(ctx.item.pos))
+                        );
+                    };
+                    #(#find_entities_iter)*
+                    ::std::result::Result::Ok(::std::option::Option::None)
+                }
+            }
+        });
+
+        for concrete in &object_args.concretes {
+            let gql_typename = &concrete.name;
+            let params = &concrete.params.0;
+            let ty = {
+                let s = quote!(#self_ty).to_string();
+                match s.rfind('<') {
+                    Some(pos) => syn::parse_str(&s[..pos]).unwrap(),
+                    None => self_ty.clone(),
+                }
+            };
+            let concrete_type = quote! { #ty<#(#params),*> };
+
+            codes.push(quote! {
+                #[#crate_name::async_trait::async_trait]
+                impl #crate_name::resolver_utils::ContainerType for #concrete_type {
+                    async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+                        self.__internal_resolve_field(ctx).await
+                    }
+
+                    async fn find_entity(&self, ctx: &#crate_name::Context<'_>, params: &#crate_name::Value) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+                        self.__internal_find_entity(ctx, params).await
+                    }
+                }
+
+                #[#crate_name::async_trait::async_trait]
+                impl #crate_name::OutputType for #concrete_type {
+                    fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                        ::std::borrow::Cow::Borrowed(#gql_typename)
+                    }
+
+                    fn create_type_info(registry: &mut #crate_name::registry::Registry) -> ::std::string::String {
+                        Self::__internal_create_type_info(registry, #gql_typename)
+                    }
+
+                    async fn resolve(
+                        &self,
+                        ctx: &#crate_name::ContextSelectionSet<'_>,
+                        _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
+                    ) -> #crate_name::ServerResult<#crate_name::Value> {
+                        #resolve_container
+                    }
+                }
+
+                impl #crate_name::ObjectType for #concrete_type {}
+            });
         }
 
-        #[allow(clippy::all, clippy::pedantic, clippy::suspicious_else_formatting)]
-        #[allow(unused_braces, unused_variables, unused_parens, unused_mut)]
-        #[#crate_name::async_trait::async_trait]
-        impl#generics #crate_name::resolver_utils::ContainerType for #shadow_type<#generics_params> #where_clause {
-            async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                #(#resolvers)*
-                ::std::result::Result::Ok(::std::option::Option::None)
-            }
-
-            async fn find_entity(&self, ctx: &#crate_name::Context<'_>, params: &#crate_name::Value) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                let params = match params {
-                    #crate_name::Value::Object(params) => params,
-                    _ => return ::std::result::Result::Ok(::std::option::Option::None),
-                };
-                let typename = if let ::std::option::Option::Some(#crate_name::Value::String(typename)) = params.get("__typename") {
-                    typename
-                } else {
-                    return ::std::result::Result::Err(
-                        #crate_name::ServerError::new(r#""__typename" must be an existing string."#, ::std::option::Option::Some(ctx.item.pos))
-                    );
-                };
-                #(#find_entities_iter)*
-                ::std::result::Result::Ok(::std::option::Option::None)
-            }
-        }
-
-        #[allow(clippy::all, clippy::pedantic)]
-        #[#crate_name::async_trait::async_trait]
-        impl #generics #crate_name::OutputType for #shadow_type<#generics_params> #where_clause {
-            async fn resolve(
-                &self,
-                ctx: &#crate_name::ContextSelectionSet<'_>,
-                _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
-            ) -> #crate_name::ServerResult<#crate_name::Value> {
-                #resolve_container
-            }
-        }
-
-        impl #generics #crate_name::ObjectType for #shadow_type<#generics_params> #where_clause {}
+        quote!(#(#codes)*)
     };
+
     Ok(expanded.into())
 }

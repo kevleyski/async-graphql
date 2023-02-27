@@ -8,12 +8,12 @@ mod utils;
 mod visitor;
 mod visitors;
 
-use crate::parser::types::ExecutableDocument;
-use crate::registry::Registry;
-use crate::{CacheControl, ServerError, Variables};
-
 pub use visitor::VisitorContext;
 use visitor::{visit, VisitorNil};
+
+use crate::{
+    parser::types::ExecutableDocument, registry::Registry, CacheControl, ServerError, Variables,
+};
 
 /// Validation results.
 #[derive(Debug, Copy, Clone)]
@@ -34,7 +34,8 @@ pub enum ValidationMode {
     /// Execute all validation rules.
     Strict,
 
-    /// The executor itself also has error handling, so it can improve performance, but it can lose some error messages.
+    /// The executor itself also has error handling, so it can improve
+    /// performance, but it can lose some error messages.
     Fast,
 }
 
@@ -71,6 +72,7 @@ pub fn check_rules(
                 .with(rules::PossibleFragmentSpreads::default())
                 .with(rules::ProvidedNonNullArguments)
                 .with(rules::KnownDirectives::default())
+                .with(rules::DirectivesUnique::default())
                 .with(rules::OverlappingFieldsCanBeMerged)
                 .with(rules::UploadFile)
                 .with(visitors::CacheControlCalculate {

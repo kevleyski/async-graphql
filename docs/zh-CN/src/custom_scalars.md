@@ -4,9 +4,10 @@
 
 实现`Async-graphql::Scalar`即可自定义一个标量，你只需要实现一个解析函数和输出函数。
 
-下面的例子定义一个64位整数标量，但它的输入输出都是字符串。 (`Async-graphql`已经内置了对64位整数的支持，正是采用字符串作为输入输出)
+下面的例子定义一个 64 位整数标量，但它的输入输出都是字符串。 (`Async-graphql`已经内置了对 64 位整数的支持，正是采用字符串作为输入输出)
 
 ```rust
+# extern crate async_graphql;
 use async_graphql::*;
 
 
@@ -36,6 +37,11 @@ impl ScalarType for StringNumber {
 如果你的类型实现了`serde :: Serialize`和`serde :: Deserialize`，那么可以使用此宏更简单地定义标量。
 
 ```rust
+# extern crate async_graphql;
+# extern crate serde;
+# use async_graphql::*;
+# use serde::{Serialize, Deserialize};
+# use std::collections::HashMap;
 #[derive(Serialize, Deserialize)]
 struct MyValue {
     a: i32,
@@ -47,6 +53,6 @@ scalar!(MyValue);
 // 重命名为`MV`.
 // scalar!(MyValue, "MV");
 
-// 重命名为`MV`并且添加描述.
+// 重命名为`MV`并且添加描述。
 // scalar!(MyValue, "MV", "This is my value");
 ```

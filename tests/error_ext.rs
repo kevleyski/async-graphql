@@ -2,6 +2,13 @@ use async_graphql::*;
 
 #[tokio::test]
 pub async fn test_error_extensions() {
+    #[derive(Enum, Eq, PartialEq, Copy, Clone)]
+    enum MyEnum {
+        Create,
+        Delete,
+        Update,
+    }
+
     struct Query;
 
     #[Object]
@@ -10,6 +17,7 @@ pub async fn test_error_extensions() {
             Err("my error".extend_with(|err, e| {
                 e.set("msg", err.to_string());
                 e.set("code", 100);
+                e.set("action", MyEnum::Create)
             }))
         }
 
@@ -40,7 +48,8 @@ pub async fn test_error_extensions() {
                 "path": ["extendErr"],
                 "extensions": {
                     "msg": "my error",
-                    "code": 100
+                    "code": 100,
+                    "action": "CREATE",
                 }
             }]
         })
@@ -65,4 +74,111 @@ pub async fn test_error_extensions() {
             }]
         })
     );
+}
+
+#[tokio::test]
+pub async fn test_failure() {
+    #[derive(thiserror::Error, Debug, PartialEq)]
+    enum MyError {
+        #[error("error1")]
+        Error1,
+
+        #[error("error2")]
+        Error2,
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn failure(&self) -> Result<i32> {
+            Err(Error::new_with_source(MyError::Error1))
+        }
+
+        async fn failure2(&self) -> Result<i32> {
+            Err(Error::new_with_source(MyError::Error2))
+        }
+
+        async fn failure3(&self) -> Result<i32> {
+            Err(Error::new_with_source(MyError::Error1)
+                .extend_with(|_, values| values.set("a", 1))
+                .extend_with(|_, values| values.set("b", 2)))
+        }
+
+        async fn failure4(&self) -> Result<i32> {
+            Err(Error::new_with_source(MyError::Error2))
+                .extend_err(|_, values| values.set("a", 1))
+                .extend_err(|_, values| values.set("b", 2))?;
+            Ok(1)
+        }
+    }
+
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    let err = schema
+        .execute("{ failure }")
+        .await
+        .into_result()
+        .unwrap_err()
+        .remove(0);
+    assert_eq!(err.source::<MyError>().unwrap(), &MyError::Error1);
+
+    let err = schema
+        .execute("{ failure2 }")
+        .await
+        .into_result()
+        .unwrap_err()
+        .remove(0);
+    assert_eq!(err.source::<MyError>().unwrap(), &MyError::Error2);
+
+    let err = schema
+        .execute("{ failure3 }")
+        .await
+        .into_result()
+        .unwrap_err()
+        .remove(0);
+    assert_eq!(err.source::<MyError>().unwrap(), &MyError::Error1);
+    assert_eq!(
+        err.extensions,
+        Some({
+            let mut values = ErrorExtensionValues::default();
+            values.set("a", 1);
+            values.set("b", 2);
+            values
+        })
+    );
+
+    let err = schema
+        .execute("{ failure4 }")
+        .await
+        .into_result()
+        .unwrap_err()
+        .remove(0);
+    assert_eq!(err.source::<MyError>().unwrap(), &MyError::Error2);
+    assert_eq!(
+        err.extensions,
+        Some({
+            let mut values = ErrorExtensionValues::default();
+            values.set("a", 1);
+            values.set("b", 2);
+            values
+        })
+    );
+}
+
+#[tokio::test]
+pub async fn test_failure2() {
+    #[derive(thiserror::Error, Debug, PartialEq)]
+    enum MyError {
+        #[error("error1")]
+        Error1,
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn failure(&self) -> Result<i32, MyError> {
+            Err(MyError::Error1)
+        }
+    }
 }

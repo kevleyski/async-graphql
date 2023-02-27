@@ -1,14 +1,14 @@
-use std::convert::TryFrom;
-
-use axum::body::Body;
-use axum::prelude::response::IntoResponse;
-use headers::HeaderName;
-use http::{HeaderValue, Response};
+use axum::{
+    body::{boxed, Body, BoxBody},
+    http,
+    http::{HeaderValue, Response},
+    response::IntoResponse,
+};
 
 /// Responder for a GraphQL response.
 ///
-/// This contains a batch response, but since regular responses are a type of batch response it
-/// works for both.
+/// This contains a batch response, but since regular responses are a type of
+/// batch response it works for both.
 pub struct GraphQLResponse(pub async_graphql::BatchResponse);
 
 impl From<async_graphql::Response> for GraphQLResponse {
@@ -24,8 +24,9 @@ impl From<async_graphql::BatchResponse> for GraphQLResponse {
 }
 
 impl IntoResponse for GraphQLResponse {
-    fn into_response(self) -> Response<Body> {
-        let mut resp = Response::new(serde_json::to_string(&self.0).unwrap().into());
+    fn into_response(self) -> Response<BoxBody> {
+        let body: Body = serde_json::to_string(&self.0).unwrap().into();
+        let mut resp = Response::new(boxed(body));
         resp.headers_mut().insert(
             http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
@@ -38,14 +39,8 @@ impl IntoResponse for GraphQLResponse {
                 }
             }
         }
-        for (name, value) in self.0.http_headers() {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::try_from(name.as_bytes()),
-                HeaderValue::from_str(value),
-            ) {
-                resp.headers_mut().insert(name, value);
-            }
-        }
+
+        resp.headers_mut().extend(self.0.http_headers());
         resp
     }
 }

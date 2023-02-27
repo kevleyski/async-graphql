@@ -1,10 +1,11 @@
 //! Async-graphql integration with Rocket.
 //!
-//! Note: This integrates with the unreleased version 0.5 of Rocket, and so breaking changes in
-//! both this library and Rocket are to be expected.
+//! Note: This integrates with the unreleased version 0.5 of Rocket, and so
+//! breaking changes in both this library and Rocket are to be expected.
 //!
-//! To configure options for sending and receiving multipart requests, add your instance of
-//! `MultipartOptions` to the state managed by Rocket (`.manage(your_multipart_options)`).
+//! To configure options for sending and receiving multipart requests, add your
+//! instance of `MultipartOptions` to the state managed by Rocket
+//! (`.manage(your_multipart_options)`).
 //!
 //! **[Full Example](<https://github.com/async-graphql/examples/blob/master/rocket/starwars/src/main.rs>)**
 
@@ -14,8 +15,7 @@
 use core::any::Any;
 use std::io::Cursor;
 
-use async_graphql::http::MultipartOptions;
-use async_graphql::{ObjectType, ParseRequestError, Schema, SubscriptionType};
+use async_graphql::{http::MultipartOptions, Executor, ParseRequestError};
 use rocket::{
     data::{self, Data, FromData, ToByteUnit},
     form::FromForm,
@@ -35,25 +35,20 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 /// }
 /// ```
 #[derive(Debug)]
-pub struct BatchRequest(pub async_graphql::BatchRequest);
+pub struct GraphQLBatchRequest(pub async_graphql::BatchRequest);
 
-impl BatchRequest {
-    /// Shortcut method to execute the request on the schema.
-    pub async fn execute<Query, Mutation, Subscription>(
-        self,
-        schema: &Schema<Query, Mutation, Subscription>,
-    ) -> Response
+impl GraphQLBatchRequest {
+    /// Shortcut method to execute the request on the executor.
+    pub async fn execute<E>(self, executor: &E) -> GraphQLResponse
     where
-        Query: ObjectType + 'static,
-        Mutation: ObjectType + 'static,
-        Subscription: SubscriptionType + 'static,
+        E: Executor,
     {
-        Response(schema.execute_batch(self.0).await)
+        GraphQLResponse(executor.execute_batch(self.0).await)
     }
 }
 
 #[rocket::async_trait]
-impl<'r> FromData<'r> for BatchRequest {
+impl<'r> FromData<'r> for GraphQLBatchRequest {
     type Error = ParseRequestError;
 
     async fn from_data(req: &'r rocket::Request<'_>, data: Data<'r>) -> data::Outcome<'r, Self> {
@@ -95,31 +90,27 @@ impl<'r> FromData<'r> for BatchRequest {
 /// }
 /// ```
 #[derive(Debug)]
-pub struct Request(pub async_graphql::Request);
+pub struct GraphQLRequest(pub async_graphql::Request);
 
-impl Request {
+impl GraphQLRequest {
     /// Shortcut method to execute the request on the schema.
-    pub async fn execute<Query, Mutation, Subscription>(
-        self,
-        schema: &Schema<Query, Mutation, Subscription>,
-    ) -> Response
+    pub async fn execute<E>(self, executor: &E) -> GraphQLResponse
     where
-        Query: ObjectType + 'static,
-        Mutation: ObjectType + 'static,
-        Subscription: SubscriptionType + 'static,
+        E: Executor,
     {
-        Response(schema.execute(self.0).await.into())
+        GraphQLResponse(executor.execute(self.0).await.into())
     }
 
     /// Insert some data for this request.
+    #[must_use]
     pub fn data<D: Any + Send + Sync>(mut self, data: D) -> Self {
         self.0.data.insert(data);
         self
     }
 }
 
-impl From<Query> for Request {
-    fn from(query: Query) -> Self {
+impl From<GraphQLQuery> for GraphQLRequest {
+    fn from(query: GraphQLQuery) -> Self {
         let mut request = async_graphql::Request::new(query.query);
 
         if let Some(operation_name) = query.operation_name {
@@ -132,7 +123,7 @@ impl From<Query> for Request {
             request = request.variables(variables);
         }
 
-        Request(request)
+        GraphQLRequest(request)
     }
 }
 
@@ -147,35 +138,30 @@ impl From<Query> for Request {
 /// }
 /// ```
 #[derive(FromForm, Debug)]
-pub struct Query {
+pub struct GraphQLQuery {
     query: String,
     #[field(name = "operationName")]
     operation_name: Option<String>,
     variables: Option<String>,
 }
 
-impl Query {
+impl GraphQLQuery {
     /// Shortcut method to execute the request on the schema.
-    pub async fn execute<Query, Mutation, Subscription>(
-        self,
-        schema: &Schema<Query, Mutation, Subscription>,
-    ) -> Response
+    pub async fn execute<E>(self, executor: &E) -> GraphQLResponse
     where
-        Query: ObjectType + 'static,
-        Mutation: ObjectType + 'static,
-        Subscription: SubscriptionType + 'static,
+        E: Executor,
     {
-        let request: Request = self.into();
-        request.execute(schema).await
+        let request: GraphQLRequest = self.into();
+        request.execute(executor).await
     }
 }
 
 #[rocket::async_trait]
-impl<'r> FromData<'r> for Request {
+impl<'r> FromData<'r> for GraphQLRequest {
     type Error = ParseRequestError;
 
     async fn from_data(req: &'r rocket::Request<'_>, data: Data<'r>) -> data::Outcome<'r, Self> {
-        BatchRequest::from_data(req, data)
+        GraphQLBatchRequest::from_data(req, data)
             .await
             .and_then(|request| match request.0.into_single() {
                 Ok(single) => data::Outcome::Success(Self(single)),
@@ -184,26 +170,26 @@ impl<'r> FromData<'r> for Request {
     }
 }
 
-/// Wrapper around `async-graphql::Response` that is a Rocket responder so it can be returned from
-/// a routing function in Rocket.
+/// Wrapper around `async-graphql::Response` that is a Rocket responder so it
+/// can be returned from a routing function in Rocket.
 ///
-/// It contains a `BatchResponse` but since a response is a type of batch response it works for
-/// both.
+/// It contains a `BatchResponse` but since a response is a type of batch
+/// response it works for both.
 #[derive(Debug)]
-pub struct Response(pub async_graphql::BatchResponse);
+pub struct GraphQLResponse(pub async_graphql::BatchResponse);
 
-impl From<async_graphql::BatchResponse> for Response {
+impl From<async_graphql::BatchResponse> for GraphQLResponse {
     fn from(batch: async_graphql::BatchResponse) -> Self {
         Self(batch)
     }
 }
-impl From<async_graphql::Response> for Response {
+impl From<async_graphql::Response> for GraphQLResponse {
     fn from(res: async_graphql::Response) -> Self {
         Self(res.into())
     }
 }
 
-impl<'r> Responder<'r, 'static> for Response {
+impl<'r> Responder<'r, 'static> for GraphQLResponse {
     fn respond_to(self, _: &'r rocket::Request<'_>) -> response::Result<'static> {
         let body = serde_json::to_string(&self.0).unwrap();
 
@@ -215,8 +201,11 @@ impl<'r> Responder<'r, 'static> for Response {
                 response.set_header(Header::new("cache-control", cache_control));
             }
         }
-        for (name, value) in self.0.http_headers() {
-            response.adjoin_header(Header::new(name.to_string(), value.to_string()));
+
+        for (name, value) in self.0.http_headers_iter() {
+            if let Ok(value) = value.to_str() {
+                response.adjoin_header(Header::new(name.as_str().to_string(), value.to_string()));
+            }
         }
 
         response.set_sized_body(body.len(), Cursor::new(body));

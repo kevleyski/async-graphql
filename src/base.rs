@@ -1,11 +1,10 @@
-use std::borrow::Cow;
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use async_graphql_value::ConstValue;
 
-use crate::parser::types::Field;
-use crate::registry::{self, Registry};
 use crate::{
+    parser::types::Field,
+    registry::{self, Registry},
     ContainerType, Context, ContextSelectionSet, Error, InputValueError, InputValueResult,
     Positioned, Result, ServerResult, Value,
 };
@@ -15,10 +14,24 @@ pub trait Description {
     fn description() -> &'static str;
 }
 
-/// Represents a GraphQL type.
-///
-/// All GraphQL types implement this trait, such as `Scalar`, `Object`, `Union` ...
-pub trait Type {
+/// Used to specify the GraphQL Type name.
+pub trait TypeName: Send + Sync {
+    /// Returns a GraphQL type name.
+    fn type_name() -> Cow<'static, str>;
+}
+
+/// Represents a GraphQL input type.
+pub trait InputType: Send + Sync + Sized {
+    /// The raw type used for validator.
+    ///
+    /// Usually it is `Self`, but the wrapper type is its internal type.
+    ///
+    /// For example:
+    ///
+    /// `i32::RawValueType` is `i32`
+    /// `Option<i32>::RawValueType` is `i32`.
+    type RawValueType;
+
     /// Type the name.
     fn type_name() -> Cow<'static, str>;
 
@@ -27,19 +40,9 @@ pub trait Type {
         format!("{}!", Self::type_name())
     }
 
-    /// Introspection type name
-    ///
-    /// Is the return value of field `__typename`, the interface and union should return the current type, and the others return `Type::type_name`.
-    fn introspection_type_name(&self) -> Cow<'static, str> {
-        Self::type_name()
-    }
-
     /// Create type information in the registry and return qualified typename.
     fn create_type_info(registry: &mut registry::Registry) -> String;
-}
 
-/// Represents a GraphQL input value.
-pub trait InputType: Type + Send + Sync + Sized {
     /// Parse from `Value`. None represents undefined.
     fn parse(value: Option<Value>) -> InputValueResult<Self>;
 
@@ -51,11 +54,33 @@ pub trait InputType: Type + Send + Sync + Sized {
     fn federation_fields() -> Option<String> {
         None
     }
+
+    /// Returns a reference to the raw value.
+    fn as_raw_value(&self) -> Option<&Self::RawValueType>;
 }
 
-/// Represents a GraphQL output value.
+/// Represents a GraphQL output type.
 #[async_trait::async_trait]
-pub trait OutputType: Type + Send + Sync {
+pub trait OutputType: Send + Sync {
+    /// Type the name.
+    fn type_name() -> Cow<'static, str>;
+
+    /// Qualified typename.
+    fn qualified_type_name() -> String {
+        format!("{}!", Self::type_name())
+    }
+
+    /// Introspection type name
+    ///
+    /// Is the return value of field `__typename`, the interface and union
+    /// should return the current type, and the others return `Type::type_name`.
+    fn introspection_type_name(&self) -> Cow<'static, str> {
+        Self::type_name()
+    }
+
+    /// Create type information in the registry and return qualified typename.
+    fn create_type_info(registry: &mut registry::Registry) -> String;
+
     /// Resolve an output value to `async_graphql::Value`.
     async fn resolve(
         &self,
@@ -64,7 +89,8 @@ pub trait OutputType: Type + Send + Sync {
     ) -> ServerResult<Value>;
 }
 
-impl<T: Type + ?Sized> Type for &T {
+#[async_trait::async_trait]
+impl<T: OutputType + ?Sized> OutputType for &T {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
     }
@@ -72,10 +98,7 @@ impl<T: Type + ?Sized> Type for &T {
     fn create_type_info(registry: &mut Registry) -> String {
         T::create_type_info(registry)
     }
-}
 
-#[async_trait::async_trait]
-impl<T: OutputType + ?Sized> OutputType for &T {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     async fn resolve(
         &self,
@@ -86,22 +109,16 @@ impl<T: OutputType + ?Sized> OutputType for &T {
     }
 }
 
-impl<T: Type, E: Into<Error> + Send + Sync + Clone> Type for Result<T, E> {
+#[async_trait::async_trait]
+impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for Result<T, E> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
     }
 
-    fn qualified_type_name() -> String {
-        T::qualified_type_name()
-    }
-
-    fn create_type_info(registry: &mut registry::Registry) -> String {
+    fn create_type_info(registry: &mut Registry) -> String {
         T::create_type_info(registry)
     }
-}
 
-#[async_trait::async_trait]
-impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for Result<T, E> {
     async fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,
@@ -120,7 +137,13 @@ impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for 
 pub trait ObjectType: ContainerType {}
 
 #[async_trait::async_trait]
-impl<T: ObjectType> ObjectType for &T {}
+impl<T: ObjectType + ?Sized> ObjectType for &T {}
+
+#[async_trait::async_trait]
+impl<T: ObjectType + ?Sized> ObjectType for Box<T> {}
+
+#[async_trait::async_trait]
+impl<T: ObjectType + ?Sized> ObjectType for Arc<T> {}
 
 /// A GraphQL interface.
 pub trait InterfaceType: ContainerType {}
@@ -131,7 +154,11 @@ pub trait UnionType: ContainerType {}
 /// A GraphQL input object.
 pub trait InputObjectType: InputType {}
 
-impl<T: Type + ?Sized> Type for Box<T> {
+/// A GraphQL oneof input object.
+pub trait OneofObjectType: InputObjectType {}
+
+#[async_trait::async_trait]
+impl<T: OutputType + ?Sized> OutputType for Box<T> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
     }
@@ -139,10 +166,7 @@ impl<T: Type + ?Sized> Type for Box<T> {
     fn create_type_info(registry: &mut Registry) -> String {
         T::create_type_info(registry)
     }
-}
 
-#[async_trait::async_trait]
-impl<T: OutputType + ?Sized> OutputType for Box<T> {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     async fn resolve(
         &self,
@@ -155,6 +179,16 @@ impl<T: OutputType + ?Sized> OutputType for Box<T> {
 
 #[async_trait::async_trait]
 impl<T: InputType> InputType for Box<T> {
+    type RawValueType = T::RawValueType;
+
+    fn type_name() -> Cow<'static, str> {
+        T::type_name()
+    }
+
+    fn create_type_info(registry: &mut Registry) -> String {
+        T::create_type_info(registry)
+    }
+
     fn parse(value: Option<ConstValue>) -> InputValueResult<Self> {
         T::parse(value)
             .map(Box::new)
@@ -164,9 +198,14 @@ impl<T: InputType> InputType for Box<T> {
     fn to_value(&self) -> ConstValue {
         T::to_value(&self)
     }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        self.as_ref().as_raw_value()
+    }
 }
 
-impl<T: Type + ?Sized> Type for Arc<T> {
+#[async_trait::async_trait]
+impl<T: OutputType + ?Sized> OutputType for Arc<T> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
     }
@@ -174,10 +213,7 @@ impl<T: Type + ?Sized> Type for Arc<T> {
     fn create_type_info(registry: &mut Registry) -> String {
         T::create_type_info(registry)
     }
-}
 
-#[async_trait::async_trait]
-impl<T: OutputType + ?Sized> OutputType for Arc<T> {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     async fn resolve(
         &self,
@@ -189,6 +225,16 @@ impl<T: OutputType + ?Sized> OutputType for Arc<T> {
 }
 
 impl<T: InputType> InputType for Arc<T> {
+    type RawValueType = T::RawValueType;
+
+    fn type_name() -> Cow<'static, str> {
+        T::type_name()
+    }
+
+    fn create_type_info(registry: &mut Registry) -> String {
+        T::create_type_info(registry)
+    }
+
     fn parse(value: Option<ConstValue>) -> InputValueResult<Self> {
         T::parse(value)
             .map(Arc::new)
@@ -197,6 +243,10 @@ impl<T: InputType> InputType for Arc<T> {
 
     fn to_value(&self) -> ConstValue {
         T::to_value(&self)
+    }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        self.as_ref().as_raw_value()
     }
 }
 

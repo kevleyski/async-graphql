@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
-use futures_util::stream::BoxStream;
-use futures_util::TryFutureExt;
+use futures_util::{stream::BoxStream, TryFutureExt};
 use tracing_futures::Instrument;
 use tracinglib::{span, Level};
 
-use crate::extensions::{
-    Extension, ExtensionContext, ExtensionFactory, NextExecute, NextParseQuery, NextRequest,
-    NextResolve, NextSubscribe, NextValidation, ResolveInfo,
+use crate::{
+    extensions::{
+        Extension, ExtensionContext, ExtensionFactory, NextExecute, NextParseQuery, NextRequest,
+        NextResolve, NextSubscribe, NextValidation, ResolveInfo,
+    },
+    parser::types::ExecutableDocument,
+    Response, ServerError, ServerResult, ValidationResult, Value, Variables,
 };
-use crate::parser::types::ExecutableDocument;
-use crate::{Response, ServerError, ServerResult, ValidationResult, Value, Variables};
 
 /// Tracing extension
 ///
@@ -21,8 +22,7 @@ use crate::{Response, ServerError, ServerResult, ValidationResult, Value, Variab
 /// # Examples
 ///
 /// ```no_run
-/// use async_graphql::*;
-/// use async_graphql::extensions::Tracing;
+/// use async_graphql::{extensions::Tracing, *};
 ///
 /// #[derive(SimpleObject)]
 /// struct Query {
@@ -33,9 +33,9 @@ use crate::{Response, ServerError, ServerResult, ValidationResult, Value, Variab
 ///     .extension(Tracing)
 ///     .finish();
 ///
-/// tokio::runtime::Runtime::new().unwrap().block_on(async {
-///     schema.execute(Request::new("{ value }")).await;
-/// });
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// schema.execute(Request::new("{ value }")).await;
+/// # });
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 pub struct Tracing;
@@ -133,20 +133,29 @@ impl Extension for TracingExtension {
         info: ResolveInfo<'_>,
         next: NextResolve<'_>,
     ) -> ServerResult<Option<Value>> {
-        let span = span!(
-            target: "async_graphql::graphql",
-            Level::INFO,
-            "field",
-            path = %info.path_node,
-            parent_type = %info.parent_type,
-            return_type = %info.return_type,
-        );
-        next.run(ctx, info)
-            .map_err(|err| {
-                tracinglib::error!(target: "async_graphql::graphql", error = %err.message);
-                err
-            })
-            .instrument(span)
-            .await
+        let span = if !info.is_for_introspection {
+            Some(span!(
+                target: "async_graphql::graphql",
+                Level::INFO,
+                "field",
+                path = %info.path_node,
+                parent_type = %info.parent_type,
+                return_type = %info.return_type,
+            ))
+        } else {
+            None
+        };
+
+        let fut = next.run(ctx, info).inspect_err(|err| {
+            tracinglib::info!(
+                target: "async_graphql::graphql",
+                error = %err.message,
+                "error",
+            );
+        });
+        match span {
+            Some(span) => fut.instrument(span).await,
+            None => fut.await,
+        }
     }
 }

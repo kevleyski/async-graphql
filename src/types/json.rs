@@ -1,19 +1,22 @@
-use std::borrow::Cow;
-use std::ops::{Deref, DerefMut};
+use std::{
+    borrow::Cow,
+    ops::{Deref, DerefMut},
+};
 
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::parser::types::Field;
-use crate::registry::{MetaType, Registry};
 use crate::{
-    from_value, to_value, ContextSelectionSet, InputValueError, InputValueResult, OutputType,
-    Positioned, Scalar, ScalarType, ServerResult, Type, Value,
+    from_value,
+    parser::types::Field,
+    registry::{MetaType, MetaTypeId, Registry},
+    to_value, ContextSelectionSet, InputType, InputValueResult, OutputType, Positioned,
+    ServerResult, Value,
 };
 
 /// A scalar that can represent any JSON value.
 ///
-/// If the inner type cannot be serialized as JSON (e.g. it has non-string keys) it will be `null`.
+/// If the inner type cannot be serialized as JSON (e.g. it has non-string keys)
+/// it will be `null`.
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash, Default)]
 #[serde(transparent)]
 pub struct Json<T>(pub T);
@@ -32,65 +35,62 @@ impl<T> DerefMut for Json<T> {
     }
 }
 
-impl<T: DeserializeOwned + Serialize> From<T> for Json<T> {
+impl<T> From<T> for Json<T> {
     fn from(value: T) -> Self {
         Self(value)
     }
 }
 
-/// A scalar that can represent any JSON value.
-#[Scalar(internal, name = "JSON")]
-impl<T: DeserializeOwned + Serialize + Send + Sync> ScalarType for Json<T> {
-    fn parse(value: Value) -> InputValueResult<Self> {
-        Ok(from_value(value)?)
-    }
+impl<T: DeserializeOwned + Serialize + Send + Sync> InputType for Json<T> {
+    type RawValueType = T;
 
-    fn to_value(&self) -> Value {
-        to_value(&self.0).unwrap_or_default()
-    }
-}
-
-/// A `Json` type that only implements `OutputType`.
-#[derive(Serialize, Clone, Debug, Eq, PartialEq, Hash, Default)]
-pub struct OutputJson<T>(pub T);
-
-impl<T> Deref for OutputJson<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> DerefMut for OutputJson<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<T: Serialize> From<T> for OutputJson<T> {
-    fn from(value: T) -> Self {
-        Self(value)
-    }
-}
-
-impl<T> Type for OutputJson<T> {
     fn type_name() -> Cow<'static, str> {
-        Cow::Borrowed("Json")
+        Cow::Borrowed("JSON")
     }
 
     fn create_type_info(registry: &mut Registry) -> String {
-        registry.create_type::<OutputJson<T>, _>(|_| MetaType::Scalar {
-            name: Self::type_name().to_string(),
-            description: None,
-            is_valid: |_| true,
+        registry.create_input_type::<Json<T>, _>(MetaTypeId::Scalar, |_| MetaType::Scalar {
+            name: <Self as InputType>::type_name().to_string(),
+            description: Some("A scalar that can represent any JSON value.".to_string()),
+            is_valid: None,
             visible: None,
+            inaccessible: false,
+            tags: Default::default(),
+            specified_by_url: None,
         })
+    }
+
+    fn parse(value: Option<Value>) -> InputValueResult<Self> {
+        Ok(from_value(value.unwrap_or_default())?)
+    }
+
+    fn to_value(&self) -> Value {
+        Value::String(serde_json::to_string(&self.0).unwrap_or_default())
+    }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        Some(&self.0)
     }
 }
 
 #[async_trait::async_trait]
-impl<T: Serialize + Send + Sync> OutputType for OutputJson<T> {
+impl<T: Serialize + Send + Sync> OutputType for Json<T> {
+    fn type_name() -> Cow<'static, str> {
+        Cow::Borrowed("JSON")
+    }
+
+    fn create_type_info(registry: &mut Registry) -> String {
+        registry.create_output_type::<Json<T>, _>(MetaTypeId::Scalar, |_| MetaType::Scalar {
+            name: <Self as OutputType>::type_name().to_string(),
+            description: Some("A scalar that can represent any JSON value.".to_string()),
+            is_valid: None,
+            visible: None,
+            inaccessible: false,
+            tags: Default::default(),
+            specified_by_url: None,
+        })
+    }
+
     async fn resolve(
         &self,
         _ctx: &ContextSelectionSet<'_>,
@@ -100,25 +100,76 @@ impl<T: Serialize + Send + Sync> OutputType for OutputJson<T> {
     }
 }
 
-/// A scalar that can represent any JSON value.
-#[Scalar(internal, name = "JSON")]
-impl ScalarType for serde_json::Value {
-    fn parse(value: Value) -> InputValueResult<Self> {
-        value
-            .into_json()
-            .map_err(|_| InputValueError::custom("Invalid JSON"))
+impl InputType for serde_json::Value {
+    type RawValueType = serde_json::Value;
+
+    fn type_name() -> Cow<'static, str> {
+        Cow::Borrowed("JSON")
+    }
+
+    fn create_type_info(registry: &mut Registry) -> String {
+        registry.create_input_type::<serde_json::Value, _>(MetaTypeId::Scalar, |_| {
+            MetaType::Scalar {
+                name: <Self as InputType>::type_name().to_string(),
+                description: Some("A scalar that can represent any JSON value.".to_string()),
+                is_valid: None,
+                visible: None,
+                inaccessible: false,
+                tags: Default::default(),
+                specified_by_url: None,
+            }
+        })
+    }
+
+    fn parse(value: Option<Value>) -> InputValueResult<Self> {
+        Ok(from_value(value.unwrap_or_default())?)
     }
 
     fn to_value(&self) -> Value {
-        Value::from_json(self.clone()).unwrap_or_default()
+        Value::String(self.to_string())
+    }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        Some(&self)
+    }
+}
+
+#[async_trait::async_trait]
+impl OutputType for serde_json::Value {
+    fn type_name() -> Cow<'static, str> {
+        Cow::Borrowed("JSON")
+    }
+
+    fn create_type_info(registry: &mut Registry) -> String {
+        registry.create_output_type::<serde_json::Value, _>(MetaTypeId::Scalar, |_| {
+            MetaType::Scalar {
+                name: <Self as OutputType>::type_name().to_string(),
+                description: Some("A scalar that can represent any JSON value.".to_string()),
+                is_valid: None,
+                visible: None,
+                inaccessible: false,
+                tags: Default::default(),
+                specified_by_url: None,
+            }
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _ctx: &ContextSelectionSet<'_>,
+        _field: &Positioned<Field>,
+    ) -> ServerResult<Value> {
+        Ok(to_value(&self).ok().unwrap_or_default())
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::*;
-    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+
+    use serde::{Deserialize, Serialize};
+
+    use crate::*;
 
     #[tokio::test]
     async fn test_json_type() {
@@ -153,7 +204,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_output_json_type() {
+    async fn test_json_type_for_serialize_only() {
         #[derive(Serialize)]
         struct MyStruct {
             a: i32,
@@ -165,7 +216,7 @@ mod test {
 
         #[Object(internal)]
         impl Query {
-            async fn obj(&self) -> OutputJson<MyStruct> {
+            async fn obj(&self) -> Json<MyStruct> {
                 MyStruct {
                     a: 1,
                     b: 2,

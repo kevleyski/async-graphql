@@ -14,6 +14,7 @@ If you need e.g. a snake_cased GraphQL field name, you can use both the `name` a
 - When only `name` exists, `name.to_camel_case()` is the GraphQL field name and the `name` is the resolver function name.
 
 ```rust
+# extern crate async_graphql;
 use async_graphql::*;
 
 struct Circle {
@@ -66,4 +67,57 @@ enum Shape {
     Circle(Circle),
     Square(Square),
 }
+```
+
+## Register the interface manually
+
+`Async-graphql` traverses and registers all directly or indirectly referenced types from `Schema` in the initialization phase.
+If an interface is not referenced, it will not exist in the registry, as in the following example , even if `MyObject` implements `MyInterface`,
+because `MyInterface` is not referenced in `Schema`, the `MyInterface` type will not exist in the registry.
+
+```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+#[derive(Interface)]
+#[graphql(
+    field(name = "name", type = "String"),
+)]
+enum MyInterface {
+    MyObject(MyObject),
+}
+
+#[derive(SimpleObject)]
+struct MyObject {
+    name: String,
+}
+
+struct Query;
+
+#[Object]
+impl Query {
+    async fn obj(&self) -> MyObject {
+        todo!()
+    }
+}
+
+type MySchema = Schema<Query, EmptyMutation, EmptySubscription>;
+```
+
+You need to manually register the `MyInterface` type when constructing the `Schema`:
+
+```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+# #[derive(Interface)]
+# #[graphql(field(name = "name", type = "String"))]
+# enum MyInterface { MyObject(MyObject) }
+# #[derive(SimpleObject)]
+# struct MyObject { name: String, }
+# struct Query;
+# #[Object]
+# impl Query { async fn version(&self) -> &str { "1.0" } }
+
+Schema::build(Query, EmptyMutation, EmptySubscription)
+    .register_output_type::<MyInterface>()
+    .finish();
 ```

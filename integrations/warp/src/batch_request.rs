@@ -1,44 +1,41 @@
-use std::convert::TryInto;
-use std::io;
-use std::io::ErrorKind;
+use std::{io, io::ErrorKind};
 
-use async_graphql::http::MultipartOptions;
-use async_graphql::{BatchRequest, ObjectType, Schema, SubscriptionType};
+use async_graphql::{http::MultipartOptions, BatchRequest, Executor};
 use futures_util::TryStreamExt;
-use warp::hyper::header::HeaderName;
-use warp::reply::Response as WarpResponse;
-use warp::{Buf, Filter, Rejection, Reply};
+use warp::{reply::Response as WarpResponse, Buf, Filter, Rejection, Reply};
 
-use crate::BadRequest;
+use crate::GraphQLBadRequest;
 
 /// GraphQL batch request filter
 ///
-/// It outputs a tuple containing the `async_graphql::Schema` and `async_graphql::BatchRequest`.
-pub fn graphql_batch<Query, Mutation, Subscription>(
-    schema: Schema<Query, Mutation, Subscription>,
-) -> impl Filter<Extract = ((Schema<Query, Mutation, Subscription>, BatchRequest),), Error = Rejection>
-       + Clone
+/// It outputs a tuple containing the `async_graphql::Executor` and
+/// `async_graphql::BatchRequest`.
+pub fn graphql_batch<E>(
+    executor: E,
+) -> impl Filter<Extract = ((E, BatchRequest),), Error = Rejection> + Clone
 where
-    Query: ObjectType + 'static,
-    Mutation: ObjectType + 'static,
-    Subscription: SubscriptionType + 'static,
+    E: Executor,
 {
-    graphql_batch_opts(schema, Default::default())
+    graphql_batch_opts(executor, Default::default())
 }
 
-/// Similar to graphql_batch, but you can set the options with :`async_graphql::MultipartOptions`.
-pub fn graphql_batch_opts<Query, Mutation, Subscription>(
-    schema: Schema<Query, Mutation, Subscription>,
+/// Similar to graphql_batch, but you can set the options with
+/// :`async_graphql::MultipartOptions`.
+pub fn graphql_batch_opts<E>(
+    executor: E,
     opts: MultipartOptions,
-) -> impl Filter<Extract = ((Schema<Query, Mutation, Subscription>, BatchRequest),), Error = Rejection>
-       + Clone
+) -> impl Filter<Extract = ((E, BatchRequest),), Error = Rejection> + Clone
 where
-    Query: ObjectType + 'static,
-    Mutation: ObjectType + 'static,
-    Subscription: SubscriptionType + 'static,
+    E: Executor,
 {
     warp::any()
-        .and(warp::get().and(warp::query()).map(BatchRequest::Single))
+        .and(warp::get().and(warp::filters::query::raw()).and_then(
+            |query_string: String| async move {
+                async_graphql::http::parse_query_string(&query_string)
+                    .map(Into::into)
+                    .map_err(|e| warp::reject::custom(GraphQLBadRequest(e)))
+            },
+        ))
         .or(warp::post()
             .and(warp::header::optional::<String>("content-type"))
             .and(warp::body::stream())
@@ -54,23 +51,23 @@ where
                     opts,
                 )
                 .await
-                .map_err(|e| warp::reject::custom(BadRequest(e)))
+                .map_err(|e| warp::reject::custom(GraphQLBadRequest(e)))
             }))
         .unify()
-        .map(move |res| (schema.clone(), res))
+        .map(move |res| (executor.clone(), res))
 }
 
 /// Reply for `async_graphql::BatchRequest`.
 #[derive(Debug)]
-pub struct BatchResponse(pub async_graphql::BatchResponse);
+pub struct GraphQLBatchResponse(pub async_graphql::BatchResponse);
 
-impl From<async_graphql::BatchResponse> for BatchResponse {
+impl From<async_graphql::BatchResponse> for GraphQLBatchResponse {
     fn from(resp: async_graphql::BatchResponse) -> Self {
-        BatchResponse(resp)
+        GraphQLBatchResponse(resp)
     }
 }
 
-impl Reply for BatchResponse {
+impl Reply for GraphQLBatchResponse {
     fn into_response(self) -> WarpResponse {
         let mut resp = warp::reply::with_header(
             warp::reply::json(&self.0),
@@ -86,13 +83,8 @@ impl Reply for BatchResponse {
                 }
             }
         }
-        for (name, value) in self.0.http_headers() {
-            if let (Ok(name), Ok(value)) = (TryInto::<HeaderName>::try_into(name), value.try_into())
-            {
-                resp.headers_mut().append(name, value);
-            }
-        }
 
+        resp.headers_mut().extend(self.0.http_headers());
         resp
     }
 }

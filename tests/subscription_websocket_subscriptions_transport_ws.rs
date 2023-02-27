@@ -1,30 +1,31 @@
-use async_graphql::http::WebSocketProtocols;
-use async_graphql::*;
+use async_graphql::{http::WebSocketProtocols, *};
 use futures_channel::mpsc;
-use futures_util::stream::{Stream, StreamExt};
-use futures_util::SinkExt;
+use futures_util::{
+    stream::{Stream, StreamExt},
+    SinkExt,
+};
 
 #[tokio::test]
 pub async fn test_subscription_ws_transport() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self) -> impl Stream<Item = i32> {
             futures_util::stream::iter(0..10)
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::SubscriptionsTransportWS);
 
@@ -84,19 +85,19 @@ pub async fn test_subscription_ws_transport() {
 pub async fn test_subscription_ws_transport_with_token() {
     struct Token(String);
 
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self, ctx: &Context<'_>) -> Result<impl Stream<Item = i32>> {
             if ctx.data_unchecked::<Token>().0 != "123456" {
                 return Err("forbidden".into());
@@ -105,12 +106,10 @@ pub async fn test_subscription_ws_transport_with_token() {
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
-    let mut stream = http::WebSocket::with_data(
-        schema,
-        rx,
-        |value| async {
+    let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::SubscriptionsTransportWS)
+        .on_connection_init(|value| async {
             #[derive(serde::Deserialize)]
             struct Payload {
                 token: String,
@@ -120,9 +119,7 @@ pub async fn test_subscription_ws_transport_with_token() {
             let mut data = Data::default();
             data.insert(Token(payload.token));
             Ok(data)
-        },
-        WebSocketProtocols::SubscriptionsTransportWS,
-    );
+        });
 
     tx.send(
         serde_json::to_string(&value!({
@@ -191,25 +188,25 @@ pub async fn test_subscription_ws_transport_error() {
         }
     }
 
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self) -> impl Stream<Item = Event> {
             futures_util::stream::iter((0..10).map(|n| Event { value: n }))
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::SubscriptionsTransportWS);
 
@@ -272,25 +269,25 @@ pub async fn test_subscription_ws_transport_error() {
 
 #[tokio::test]
 pub async fn test_subscription_too_many_initialisation_requests_error() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self) -> impl Stream<Item = i32> {
             futures_util::stream::once(async move { 10 })
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::SubscriptionsTransportWS);
 
@@ -332,16 +329,16 @@ pub async fn test_subscription_too_many_initialisation_requests_error() {
 
 #[tokio::test]
 pub async fn test_query_over_websocket() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             999
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::SubscriptionsTransportWS);
 
@@ -394,16 +391,16 @@ pub async fn test_query_over_websocket() {
 
 #[tokio::test]
 pub async fn test_start_before_connection_init() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             999
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
     let (mut tx, rx) = mpsc::unbounded();
     let mut stream = http::WebSocket::new(schema, rx, WebSocketProtocols::SubscriptionsTransportWS);
 

@@ -1,32 +1,49 @@
 # Actix-web
 
-`Async-graphql-actix-web`提供实现了`actix_web::FromRequest`的`Request`，它其实是`async_graphql::Request`的包装，你可以调用`Request::into_inner`把它转换成一个`async_graphql::Request`。
+`Async-graphql-actix-web`提供了`GraphQLRequest`提取器用于提取`GraphQL`请求，和`GraphQLResponse`用于输出`GraphQL`响应。
 
-`WSSubscription`是一个支持Web Socket订阅的Actor。
+`GraphQLSubscription`用于创建一个支持 Web Socket 订阅的 Actor。
 
 ## 请求例子
 
-你需要把Schema传入`actix_web::App`作为全局数据。
+你需要把 Schema 传入`actix_web::App`作为全局数据。
 
 ```rust
+# extern crate async_graphql_actix_web;
+# extern crate async_graphql;
+# extern crate actix_web;
+# use async_graphql::*;
+# #[derive(Default,SimpleObject)]
+# struct Query { a: i32 }
+# let schema = Schema::build(Query::default(), EmptyMutation, EmptySubscription).finish();
+use actix_web::{web, HttpRequest, HttpResponse};
+use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse};
 async fn index(
-    schema: web::Data<Schema>,
-    request: async_graphql_actix_web::Request,
-) -> web::Json<Response> {
-    web::Json(Response(schema.execute(request.into_inner()).await)
+    schema: web::Data<Schema<Query, EmptyMutation, EmptySubscription>>,
+    request: GraphQLRequest,
+) -> web::Json<GraphQLResponse> {
+    web::Json(schema.execute(request.into_inner()).await.into())
 }
-
 ```
 
 ## 订阅例子
 
 ```rust
+# extern crate async_graphql_actix_web;
+# extern crate async_graphql;
+# extern crate actix_web;
+# use async_graphql::*;
+# #[derive(Default,SimpleObject)]
+# struct Query { a: i32 }
+# let schema = Schema::build(Query::default(), EmptyMutation, EmptySubscription).finish();
+use actix_web::{web, HttpRequest, HttpResponse};
+use async_graphql_actix_web::GraphQLSubscription;
 async fn index_ws(
-    schema: web::Data<Schema>,
+    schema: web::Data<Schema<Query, EmptyMutation, EmptySubscription>>,
     req: HttpRequest,
     payload: web::Payload,
-) -> Result<HttpResponse> {
-    WSSubscription::start(Schema::clone(&*schema), &req, payload)
+) -> actix_web::Result<HttpResponse> {
+    GraphQLSubscription::new(Schema::clone(&*schema)).start(&req, payload)
 }
 ```
 

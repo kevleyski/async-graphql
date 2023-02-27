@@ -12,6 +12,14 @@ mod opentelemetry;
 #[cfg(feature = "tracing")]
 mod tracing;
 
+use std::{
+    any::{Any, TypeId},
+    future::Future,
+    sync::Arc,
+};
+
+use futures_util::stream::BoxStream;
+
 pub use self::analyzer::Analyzer;
 #[cfg(feature = "apollo_tracing")]
 pub use self::apollo_tracing::ApolloTracing;
@@ -21,17 +29,9 @@ pub use self::logger::Logger;
 pub use self::opentelemetry::OpenTelemetry;
 #[cfg(feature = "tracing")]
 pub use self::tracing::Tracing;
-
-use std::any::{Any, TypeId};
-use std::future::Future;
-use std::sync::Arc;
-
-use futures_util::stream::BoxStream;
-
-use crate::parser::types::ExecutableDocument;
 use crate::{
-    Data, Error, QueryPathNode, Request, Response, Result, SchemaEnv, ServerError, ServerResult,
-    ValidationResult, Value, Variables,
+    parser::types::ExecutableDocument, Data, DataContext, Error, QueryPathNode, Request, Response,
+    Result, SchemaEnv, ServerError, ServerResult, ValidationResult, Value, Variables,
 };
 
 /// Context for extension
@@ -44,6 +44,20 @@ pub struct ExtensionContext<'a> {
 
     #[doc(hidden)]
     pub query_data: Option<&'a Data>,
+}
+
+impl<'a> DataContext<'a> for ExtensionContext<'a> {
+    fn data<D: Any + Send + Sync>(&self) -> Result<&'a D> {
+        ExtensionContext::data::<D>(self)
+    }
+
+    fn data_unchecked<D: Any + Send + Sync>(&self) -> &'a D {
+        ExtensionContext::data_unchecked::<D>(self)
+    }
+
+    fn data_opt<D: Any + Send + Sync>(&self) -> Option<&'a D> {
+        ExtensionContext::data_opt::<D>(self)
+    }
 }
 
 impl<'a> ExtensionContext<'a> {
@@ -59,7 +73,8 @@ impl<'a> ExtensionContext<'a> {
 
     /// Gets the global data defined in the `Context` or `Schema`.
     ///
-    /// If both `Schema` and `Query` have the same data type, the data in the `Query` is obtained.
+    /// If both `Schema` and `Query` have the same data type, the data in the
+    /// `Query` is obtained.
     ///
     /// # Errors
     ///
@@ -83,7 +98,8 @@ impl<'a> ExtensionContext<'a> {
             .unwrap_or_else(|| panic!("Data `{}` does not exist.", std::any::type_name::<D>()))
     }
 
-    /// Gets the global data defined in the `Context` or `Schema` or `None` if the specified type data does not exist.
+    /// Gets the global data defined in the `Context` or `Schema` or `None` if
+    /// the specified type data does not exist.
     pub fn data_opt<D: Any + Send + Sync>(&self) -> Option<&'a D> {
         self.query_data
             .and_then(|query_data| query_data.get(&TypeId::of::<D>()))
@@ -109,6 +125,9 @@ pub struct ResolveInfo<'a> {
 
     /// Current field alias
     pub alias: Option<&'a str>,
+
+    /// If `true` means the current field is for introspection.
+    pub is_for_introspection: bool,
 }
 
 type RequestFut<'a> = &'a mut (dyn Future<Output = Response> + Send + Unpin);
@@ -120,7 +139,8 @@ type ValidationFut<'a> =
 
 type ExecuteFut<'a> = &'a mut (dyn Future<Output = Response> + Send + Unpin);
 
-type ResolveFut<'a> = &'a mut (dyn Future<Output = ServerResult<Option<Value>>> + Send + Unpin);
+/// A future type used to resolve the field
+pub type ResolveFut<'a> = &'a mut (dyn Future<Output = ServerResult<Option<Value>>> + Send + Unpin);
 
 /// The remainder of a extension chain for request.
 pub struct NextRequest<'a> {

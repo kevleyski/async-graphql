@@ -14,6 +14,7 @@ use crate::Value;
 /// playground_source(GraphQLPlaygroundConfig::new("http://localhost:8000"));
 /// ```
 pub fn playground_source(config: GraphQLPlaygroundConfig) -> String {
+    let title = config.title.unwrap_or("GraphQL Playground");
     r##"
 <!DOCTYPE html>
 
@@ -22,7 +23,7 @@ pub fn playground_source(config: GraphQLPlaygroundConfig) -> String {
 <head>
   <meta charset=utf-8 />
   <meta name="viewport" content="user-scalable=no, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, minimal-ui">
-  <title>GraphQL Playground</title>
+  <title>%GRAPHQL_PLAYGROUND_TITLE%</title>
   <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/graphql-playground-react/build/static/css/index.css" />
   <link rel="shortcut icon" href="//cdn.jsdelivr.net/npm/graphql-playground-react/build/favicon.png" />
   <script src="//cdn.jsdelivr.net/npm/graphql-playground-react/build/static/js/middleware.js"></script>
@@ -557,6 +558,7 @@ pub fn playground_source(config: GraphQLPlaygroundConfig) -> String {
             Ok(str) => str,
             Err(_) => "{}".to_string()
         })
+        .replace("%GRAPHQL_PLAYGROUND_TITLE%", title)
 }
 
 /// Config for GraphQL Playground
@@ -567,6 +569,7 @@ pub struct GraphQLPlaygroundConfig<'a> {
     subscription_endpoint: Option<&'a str>,
     headers: Option<HashMap<&'a str, &'a str>>,
     settings: Option<HashMap<&'a str, Value>>,
+    title: Option<&'a str>,
 }
 
 impl<'a> GraphQLPlaygroundConfig<'a> {
@@ -577,16 +580,19 @@ impl<'a> GraphQLPlaygroundConfig<'a> {
             subscription_endpoint: None,
             headers: Default::default(),
             settings: Default::default(),
+            title: Default::default(),
         }
     }
 
     /// Set subscription endpoint, for example: `ws://localhost:8000`.
+    #[must_use]
     pub fn subscription_endpoint(mut self, endpoint: &'a str) -> Self {
         self.subscription_endpoint = Some(endpoint);
         self
     }
 
     /// Set HTTP header for per query.
+    #[must_use]
     pub fn with_header(mut self, name: &'a str, value: &'a str) -> Self {
         if let Some(headers) = &mut self.headers {
             headers.insert(name, value);
@@ -595,6 +601,13 @@ impl<'a> GraphQLPlaygroundConfig<'a> {
             headers.insert(name, value);
             self.headers = Some(headers);
         }
+        self
+    }
+
+    /// Set the html document title.
+    #[must_use]
+    pub fn title(mut self, title: &'a str) -> Self {
+        self.title = Some(title);
         self
     }
 
@@ -607,6 +620,7 @@ impl<'a> GraphQLPlaygroundConfig<'a> {
     ///     .with_setting("setting", false)
     ///     .with_setting("other", Value::Null);
     /// ```
+    #[must_use]
     pub fn with_setting(mut self, name: &'a str, value: impl Into<Value>) -> Self {
         let value = value.into();
 
@@ -623,8 +637,9 @@ impl<'a> GraphQLPlaygroundConfig<'a> {
 
 #[cfg(test)]
 mod tests {
+    use indexmap::IndexMap;
+
     use super::*;
-    use std::collections::BTreeMap;
 
     #[test]
     fn test_with_setting_can_use_any_json_value() {
@@ -634,7 +649,7 @@ mod tests {
             .with_setting("number", 10)
             .with_setting("null", Value::Null)
             .with_setting("array", Vec::from([1, 2, 3]))
-            .with_setting("object", BTreeMap::new());
+            .with_setting("object", IndexMap::new());
 
         let json = serde_json::to_value(settings).unwrap();
         let settings = json["settings"].as_object().unwrap();

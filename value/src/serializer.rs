@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
+use std::{error::Error, fmt};
 
-use serde::ser::{self, Impossible};
-use serde::Serialize;
+use indexmap::IndexMap;
+use serde::{
+    ser::{self, Impossible},
+    Serialize,
+};
 
 use crate::{ConstValue, Name, Number};
 
@@ -31,7 +32,8 @@ impl ser::Error for SerializerError {
     }
 }
 
-/// Convert a `T` into `ConstValue` which is an enum that can represent any valid GraphQL data.
+/// Convert a `T` into `ConstValue` which is an enum that can represent any
+/// valid GraphQL data.
 #[inline]
 pub fn to_value<T: ser::Serialize>(value: T) -> Result<ConstValue, SerializerError> {
     value.serialize(Serializer)
@@ -180,7 +182,7 @@ impl ser::Serializer for Serializer {
         T: ser::Serialize,
     {
         value.serialize(self).map(|v| {
-            let mut map = BTreeMap::new();
+            let mut map = IndexMap::new();
             map.insert(Name::new(variant), v);
             ConstValue::Object(map)
         })
@@ -222,7 +224,7 @@ impl ser::Serializer for Serializer {
     #[inline]
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
         Ok(SerializeMap {
-            map: BTreeMap::new(),
+            map: IndexMap::new(),
             key: None,
         })
     }
@@ -233,7 +235,7 @@ impl ser::Serializer for Serializer {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
-        Ok(SerializeStruct(BTreeMap::new()))
+        Ok(SerializeStruct(IndexMap::new()))
     }
 
     #[inline]
@@ -244,12 +246,12 @@ impl ser::Serializer for Serializer {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
-        Ok(SerializeStructVariant(Name::new(variant), BTreeMap::new()))
+        Ok(SerializeStructVariant(Name::new(variant), IndexMap::new()))
     }
 
     #[inline]
     fn is_human_readable(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -337,14 +339,14 @@ impl ser::SerializeTupleVariant for SerializeTupleVariant {
 
     #[inline]
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        let mut map = BTreeMap::new();
+        let mut map = IndexMap::new();
         map.insert(self.0, ConstValue::List(self.1));
         Ok(ConstValue::Object(map))
     }
 }
 
 struct SerializeMap {
-    map: BTreeMap<Name, ConstValue>,
+    map: IndexMap<Name, ConstValue>,
     key: Option<Name>,
 }
 
@@ -378,7 +380,7 @@ impl ser::SerializeMap for SerializeMap {
     }
 }
 
-struct SerializeStruct(BTreeMap<Name, ConstValue>);
+struct SerializeStruct(IndexMap<Name, ConstValue>);
 
 impl ser::SerializeStruct for SerializeStruct {
     type Ok = ConstValue;
@@ -405,7 +407,7 @@ impl ser::SerializeStruct for SerializeStruct {
     }
 }
 
-struct SerializeStructVariant(Name, BTreeMap<Name, ConstValue>);
+struct SerializeStructVariant(Name, IndexMap<Name, ConstValue>);
 
 impl ser::SerializeStructVariant for SerializeStructVariant {
     type Ok = ConstValue;
@@ -428,7 +430,7 @@ impl ser::SerializeStructVariant for SerializeStructVariant {
 
     #[inline]
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        let mut map = BTreeMap::new();
+        let mut map = IndexMap::new();
         map.insert(self.0, ConstValue::Object(self.1));
         Ok(ConstValue::Object(map))
     }

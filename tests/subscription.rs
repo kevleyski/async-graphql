@@ -1,10 +1,10 @@
 use async_graphql::*;
 use futures_util::stream::{Stream, StreamExt, TryStreamExt};
 
-struct QueryRoot;
+struct Query;
 
 #[Object]
-impl QueryRoot {
+impl Query {
     async fn value(&self) -> i32 {
         10
     }
@@ -18,10 +18,10 @@ pub async fn test_subscription() {
         b: i32,
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self, start: i32, end: i32) -> impl Stream<Item = i32> {
             futures_util::stream::iter(start..end)
         }
@@ -31,7 +31,7 @@ pub async fn test_subscription() {
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
 
     {
         let mut stream = schema
@@ -59,10 +59,10 @@ pub async fn test_subscription() {
 
 #[tokio::test]
 pub async fn test_subscription_with_ctx_data() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
@@ -77,10 +77,10 @@ pub async fn test_subscription_with_ctx_data() {
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self, ctx: &Context<'_>) -> impl Stream<Item = i32> {
             let value = *ctx.data_unchecked::<i32>();
             futures_util::stream::once(async move { value })
@@ -91,7 +91,7 @@ pub async fn test_subscription_with_ctx_data() {
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
 
     {
         let mut stream = schema
@@ -108,21 +108,21 @@ pub async fn test_subscription_with_ctx_data() {
 
 #[tokio::test]
 pub async fn test_subscription_with_token() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     struct Token(String);
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self, ctx: &Context<'_>) -> Result<impl Stream<Item = i32>> {
             if ctx.data_unchecked::<Token>().0 != "123456" {
                 return Err("forbidden".into());
@@ -131,7 +131,7 @@ pub async fn test_subscription_with_token() {
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
 
     {
         let mut stream = schema
@@ -163,25 +163,25 @@ pub async fn test_subscription_inline_fragment() {
         b: i32,
     }
 
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         async fn value(&self) -> i32 {
             10
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self, start: i32, end: i32) -> impl Stream<Item = Event> {
             futures_util::stream::iter((start..end).map(|n| Event { a: n, b: n * 10 }))
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let mut stream = schema
         .execute_stream(
             r#"
@@ -219,17 +219,17 @@ pub async fn test_subscription_fragment() {
         Event(Event),
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self, start: i32, end: i32) -> impl Stream<Item = Event> {
             futures_util::stream::iter((start..end).map(|n| Event { a: n, b: n * 10 }))
         }
     }
 
-    let schema = Schema::build(QueryRoot, EmptyMutation, SubscriptionRoot)
-        .register_type::<MyInterface>()
+    let schema = Schema::build(Query, EmptyMutation, Subscription)
+        .register_output_type::<MyInterface>()
         .finish();
     let mut stream = schema
         .execute_stream(
@@ -268,17 +268,17 @@ pub async fn test_subscription_fragment2() {
         Event(Event),
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self, start: i32, end: i32) -> impl Stream<Item = Event> {
             futures_util::stream::iter((start..end).map(|n| Event { a: n, b: n * 10 }))
         }
     }
 
-    let schema = Schema::build(QueryRoot, EmptyMutation, SubscriptionRoot)
-        .register_type::<MyInterface>()
+    let schema = Schema::build(Query, EmptyMutation, Subscription)
+        .register_output_type::<MyInterface>()
         .finish();
     let mut stream = schema
         .execute_stream(
@@ -313,7 +313,7 @@ pub async fn test_subscription_error() {
     #[Object]
     impl Event {
         async fn value(&self) -> Result<i32> {
-            if self.value < 5 {
+            if self.value != 5 {
                 Ok(self.value)
             } else {
                 Err("TestError".into())
@@ -321,30 +321,33 @@ pub async fn test_subscription_error() {
         }
     }
 
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn events(&self) -> impl Stream<Item = Event> {
             futures_util::stream::iter((0..10).map(|n| Event { value: n }))
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let mut stream = schema
         .execute_stream("subscription { events { value } }")
         .map(|resp| resp.into_result())
         .map_ok(|resp| resp.data);
+
     for i in 0i32..5 {
         assert_eq!(
             value!({ "events": { "value": i } }),
             stream.next().await.unwrap().unwrap()
         );
     }
+
     assert_eq!(
         stream.next().await,
         Some(Err(vec![ServerError {
             message: "TestError".to_string(),
+            source: None,
             locations: vec![Pos {
                 line: 1,
                 column: 25
@@ -357,50 +360,63 @@ pub async fn test_subscription_error() {
         }]))
     );
 
+    for i in 6i32..10 {
+        assert_eq!(
+            value!({ "events": { "value": i } }),
+            stream.next().await.unwrap().unwrap()
+        );
+    }
+
     assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
 pub async fn test_subscription_fieldresult() {
-    struct SubscriptionRoot;
+    struct Subscription;
 
     #[Subscription]
-    impl SubscriptionRoot {
+    impl Subscription {
         async fn values(&self) -> impl Stream<Item = Result<i32>> {
             futures_util::stream::iter(0..5)
                 .map(Result::Ok)
                 .chain(futures_util::stream::once(async move {
                     Err("StreamErr".into())
                 }))
+                .chain(futures_util::stream::iter(5..10).map(Result::Ok))
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, SubscriptionRoot);
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
     let mut stream = schema.execute_stream("subscription { values }");
+
     for i in 0i32..5 {
         assert_eq!(
             Response::new(value!({ "values": i })),
             stream.next().await.unwrap()
         );
     }
+
+    let resp = stream.next().await.unwrap();
     assert_eq!(
-        Response {
-            data: Value::Null,
-            extensions: Default::default(),
-            cache_control: Default::default(),
-            errors: vec![ServerError {
-                message: "StreamErr".to_string(),
-                locations: vec![Pos {
-                    line: 1,
-                    column: 16
-                }],
-                path: vec![PathSegment::Field("values".to_owned())],
-                extensions: None,
+        resp.errors,
+        vec![ServerError {
+            message: "StreamErr".to_string(),
+            source: None,
+            locations: vec![Pos {
+                line: 1,
+                column: 16
             }],
-            http_headers: Default::default()
-        },
-        stream.next().await.unwrap(),
+            path: vec![PathSegment::Field("values".to_owned())],
+            extensions: None,
+        }]
     );
+
+    for i in 5i32..10 {
+        assert_eq!(
+            Response::new(value!({ "values": i })),
+            stream.next().await.unwrap()
+        );
+    }
 
     assert!(stream.next().await.is_none());
 }

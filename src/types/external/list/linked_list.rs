@@ -1,14 +1,13 @@
-use std::borrow::Cow;
-use std::collections::LinkedList;
+use std::{borrow::Cow, collections::LinkedList};
 
-use crate::parser::types::Field;
-use crate::resolver_utils::resolve_list;
 use crate::{
-    registry, ContextSelectionSet, InputType, InputValueError, InputValueResult, OutputType,
-    Positioned, ServerResult, Type, Value,
+    parser::types::Field, registry, resolver_utils::resolve_list, ContextSelectionSet, InputType,
+    InputValueError, InputValueResult, OutputType, Positioned, ServerResult, Value,
 };
 
-impl<T: Type> Type for LinkedList<T> {
+impl<T: InputType> InputType for LinkedList<T> {
+    type RawValueType = Self;
+
     fn type_name() -> Cow<'static, str> {
         Cow::Owned(format!("[{}]", T::qualified_type_name()))
     }
@@ -21,9 +20,7 @@ impl<T: Type> Type for LinkedList<T> {
         T::create_type_info(registry);
         Self::qualified_type_name()
     }
-}
 
-impl<T: InputType> InputType for LinkedList<T> {
     fn parse(value: Option<Value>) -> InputValueResult<Self> {
         match value.unwrap_or_default() {
             Value::List(values) => values
@@ -43,10 +40,27 @@ impl<T: InputType> InputType for LinkedList<T> {
     fn to_value(&self) -> Value {
         Value::List(self.iter().map(InputType::to_value).collect())
     }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        Some(self)
+    }
 }
 
 #[async_trait::async_trait]
 impl<T: OutputType> OutputType for LinkedList<T> {
+    fn type_name() -> Cow<'static, str> {
+        Cow::Owned(format!("[{}]", T::qualified_type_name()))
+    }
+
+    fn qualified_type_name() -> String {
+        format!("[{}]!", T::qualified_type_name())
+    }
+
+    fn create_type_info(registry: &mut registry::Registry) -> String {
+        T::create_type_info(registry);
+        Self::qualified_type_name()
+    }
+
     async fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,

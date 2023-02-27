@@ -1,11 +1,11 @@
-use std::borrow::Cow;
-use std::fs::File;
-use std::io::Read;
+use std::{borrow::Cow, io::Read, sync::Arc};
 
 #[cfg(feature = "unblock")]
 use futures_util::io::AsyncRead;
 
-use crate::{registry, Context, InputType, InputValueError, InputValueResult, Type, Value};
+use crate::{
+    registry, registry::MetaTypeId, Context, InputType, InputValueError, InputValueResult, Value,
+};
 
 /// A file upload value.
 pub struct UploadValue {
@@ -14,41 +14,81 @@ pub struct UploadValue {
     /// The content type of the file.
     pub content_type: Option<String>,
     /// The file data.
-    pub content: File,
+    #[cfg(feature = "tempfile")]
+    pub content: std::fs::File,
+    /// The file data.
+    #[cfg(not(feature = "tempfile"))]
+    pub content: bytes::Bytes,
 }
 
 impl UploadValue {
-    /// Attempt to clone the upload value. This type's `Clone` implementation simply calls this and
-    /// panics on failure.
+    /// Attempt to clone the upload value. This type's `Clone` implementation
+    /// simply calls this and panics on failure.
     ///
     /// # Errors
     ///
     /// Fails if cloning the inner `File` fails.
     pub fn try_clone(&self) -> std::io::Result<Self> {
-        Ok(Self {
-            filename: self.filename.clone(),
-            content_type: self.content_type.clone(),
-            content: self.content.try_clone()?,
-        })
+        #[cfg(feature = "tempfile")]
+        {
+            Ok(Self {
+                filename: self.filename.clone(),
+                content_type: self.content_type.clone(),
+                content: self.content.try_clone()?,
+            })
+        }
+
+        #[cfg(not(feature = "tempfile"))]
+        {
+            Ok(Self {
+                filename: self.filename.clone(),
+                content_type: self.content_type.clone(),
+                content: self.content.clone(),
+            })
+        }
     }
 
     /// Convert to a `Read`.
     ///
     /// **Note**: this is a *synchronous/blocking* reader.
     pub fn into_read(self) -> impl Read + Sync + Send + 'static {
-        self.content
+        #[cfg(feature = "tempfile")]
+        {
+            self.content
+        }
+
+        #[cfg(not(feature = "tempfile"))]
+        {
+            std::io::Cursor::new(self.content)
+        }
     }
 
+    /// Convert to a `AsyncRead`.
     #[cfg(feature = "unblock")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unblock")))]
-    /// Convert to a `AsyncRead`.
     pub fn into_async_read(self) -> impl AsyncRead + Sync + Send + 'static {
-        blocking::Unblock::new(self.content)
+        #[cfg(feature = "tempfile")]
+        {
+            blocking::Unblock::new(self.content)
+        }
+
+        #[cfg(not(feature = "tempfile"))]
+        {
+            std::io::Cursor::new(self.content)
+        }
     }
 
     /// Returns the size of the file, in bytes.
     pub fn size(&self) -> std::io::Result<u64> {
-        self.content.metadata().map(|meta| meta.len())
+        #[cfg(feature = "tempfile")]
+        {
+            self.content.metadata().map(|meta| meta.len())
+        }
+
+        #[cfg(not(feature = "tempfile"))]
+        {
+            Ok(self.content.len() as u64)
+        }
     }
 }
 
@@ -58,8 +98,8 @@ impl UploadValue {
 ///
 ///
 /// Graphql supports file uploads via `multipart/form-data`.
-/// Enable this feature by accepting an argument of type `Upload` (single file) or
-/// `Vec<Upload>` (multiple files) in your mutation like in the example blow.
+/// Enable this feature by accepting an argument of type `Upload` (single file)
+/// or `Vec<Upload>` (multiple files) in your mutation like in the example blow.
 ///
 ///
 /// # Example
@@ -68,19 +108,19 @@ impl UploadValue {
 /// ```
 /// use async_graphql::*;
 ///
-/// struct MutationRoot;
+/// struct Mutation;
 ///
 /// #[Object]
-/// impl MutationRoot {
+/// impl Mutation {
 ///     async fn upload(&self, ctx: &Context<'_>, file: Upload) -> bool {
 ///         println!("upload: filename={}", file.value(ctx).unwrap().filename);
 ///         true
 ///     }
 /// }
-///
 /// ```
 /// # Example Curl Request
-/// Assuming you have defined your MutationRoot like in the example above,
+///
+/// Assuming you have defined your Mutation like in the example above,
 /// you can now upload a file `myFile.txt` with the below curl command:
 ///
 /// ```curl
@@ -100,22 +140,27 @@ impl Upload {
     }
 }
 
-impl Type for Upload {
+impl InputType for Upload {
+    type RawValueType = Self;
+
     fn type_name() -> Cow<'static, str> {
         Cow::Borrowed("Upload")
     }
 
     fn create_type_info(registry: &mut registry::Registry) -> String {
-        registry.create_type::<Self, _>(|_| registry::MetaType::Scalar {
+        registry.create_input_type::<Self, _>(MetaTypeId::Scalar, |_| registry::MetaType::Scalar {
             name: Self::type_name().to_string(),
             description: None,
-            is_valid: |value| matches!(value, Value::String(_)),
+            is_valid: Some(Arc::new(|value| matches!(value, Value::String(_)))),
             visible: None,
+            inaccessible: false,
+            tags: Default::default(),
+            specified_by_url: Some(
+                "https://github.com/jaydenseric/graphql-multipart-request-spec".to_string(),
+            ),
         })
     }
-}
 
-impl InputType for Upload {
     fn parse(value: Option<Value>) -> InputValueResult<Self> {
         const PREFIX: &str = "#__graphql_file__:";
         let value = value.unwrap_or_default();
@@ -129,5 +174,9 @@ impl InputType for Upload {
 
     fn to_value(&self) -> Value {
         Value::Null
+    }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        Some(self)
     }
 }

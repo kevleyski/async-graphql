@@ -258,7 +258,7 @@ pub async fn test_generic_subscription() {
     }
 
     #[Subscription]
-    impl<T: OutputType + Type> MySubscription<T>
+    impl<T: OutputType> MySubscription<T>
     where
         T: Clone + Send + Sync + Unpin,
     {
@@ -290,4 +290,129 @@ pub async fn test_generic_subscription() {
         }
         assert!(stream.next().await.is_none());
     }
+}
+
+#[tokio::test]
+pub async fn test_concrete_object() {
+    struct GbObject<A, B>(A, B);
+
+    #[Object(
+        concrete(name = "Obj_i32i64", params(i32, i64)),
+        concrete(name = "Obj_f32f64", params(f32, f64))
+    )]
+    impl<A: OutputType, B: OutputType> GbObject<A, B> {
+        async fn a(&self) -> &A {
+            &self.0
+        }
+
+        async fn b(&self) -> &B {
+            &self.1
+        }
+    }
+
+    assert_eq!(GbObject::<i32, i64>::type_name(), "Obj_i32i64");
+    assert_eq!(GbObject::<f32, f64>::type_name(), "Obj_f32f64");
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn a(&self) -> GbObject<i32, i64> {
+            GbObject(10, 20)
+        }
+
+        async fn b(&self) -> GbObject<f32, f64> {
+            GbObject(88.0, 99.0)
+        }
+    }
+
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    assert_eq!(
+        schema
+            .execute("{ a { __typename a b } b { __typename a b } }")
+            .await
+            .into_result()
+            .unwrap()
+            .data,
+        value!({
+            "a": {
+                "__typename": "Obj_i32i64",
+                "a": 10,
+                "b": 20,
+            },
+            "b": {
+                "__typename": "Obj_f32f64",
+                "a": 88.0,
+                "b": 99.0,
+            }
+        })
+    );
+}
+
+#[tokio::test]
+pub async fn test_concrete_object_with_lifetime() {
+    #[derive(SimpleObject)]
+    #[graphql(concrete(name = "Bar0", params(i32)))]
+    #[graphql(concrete(name = "Bar1", params(i64)))]
+    struct Foo<'a, T>
+    where
+        T: Sync + OutputType + 'a,
+    {
+        data: &'a T,
+    }
+
+    struct Query {
+        value1: i32,
+        value2: i64,
+    }
+
+    #[Object]
+    impl Query {
+        async fn a(&self) -> Foo<'_, i32> {
+            Foo { data: &self.value1 }
+        }
+
+        async fn b(&self) -> Foo<'_, i64> {
+            Foo { data: &self.value2 }
+        }
+
+        async fn static_a(&self) -> Foo<'static, i32> {
+            Foo { data: &100 }
+        }
+
+        async fn static_b(&self) -> Foo<'static, i32> {
+            Foo { data: &200 }
+        }
+    }
+
+    let schema = Schema::new(
+        Query {
+            value1: 88,
+            value2: 99,
+        },
+        EmptyMutation,
+        EmptySubscription,
+    );
+
+    assert_eq!(
+        schema
+            .execute(
+                r#"{ 
+                a { data } 
+                b { data }
+                staticA { data }
+                staticB { data }
+            }"#
+            )
+            .await
+            .into_result()
+            .unwrap()
+            .data,
+        value!({
+            "a": { "data": 88 },
+            "b": { "data": 99 },
+            "staticA": { "data": 100 },
+            "staticB": { "data": 200 },
+        })
+    );
 }

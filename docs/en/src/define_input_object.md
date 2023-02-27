@@ -8,6 +8,9 @@ The definition of `InputObject` is similar to [SimpleObject](define_simple_objec
 You can add optional `#[graphql]` attributes to add descriptions or rename the field.
 
 ```rust
+# extern crate async_graphql;
+# #[derive(SimpleObject)]
+# struct User { a: i32 }
 use async_graphql::*;
 
 #[derive(InputObject)]
@@ -23,6 +26,7 @@ impl Mutation {
     async fn users_at_location(&self, coordinate: Coordinate, radius: f64) -> Vec<User> {
         // Writes coordination to database.
         // ...
+#       todo!()
     }
 }
 ```
@@ -35,6 +39,12 @@ and specify how its concrete types should be implemented.
 In the following example, two `InputObject` types are created:
 
 ```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+# #[derive(InputObject)]
+# struct SomeType { a: i32 }
+# #[derive(InputObject)]
+# struct SomeOtherType { a: i32 }
 #[derive(InputObject)]
 #[graphql(concrete(name = "SomeName", params(SomeType)))]
 #[graphql(concrete(name = "SomeOtherName", params(SomeOtherType)))]
@@ -63,6 +73,19 @@ input SomeOtherName {
 In your resolver method or field of another input object, use as a normal generic type:
 
 ```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+# #[derive(InputObject)]
+# struct SomeType { a: i32 }
+# #[derive(InputObject)]
+# struct SomeOtherType { a: i32 }
+# #[derive(InputObject)]
+# #[graphql(concrete(name = "SomeName", params(SomeType)))]
+# #[graphql(concrete(name = "SomeOtherName", params(SomeOtherType)))]
+# pub struct SomeGenericInput<T: InputType> {
+#     field1: Option<T>,
+#     field2: String
+# }
 #[derive(InputObject)]
 pub struct YetAnotherInput {
     a: SomeGenericInput<SomeType>,
@@ -71,3 +94,18 @@ pub struct YetAnotherInput {
 ```
 
 You can pass multiple generic types to `params()`, separated by a comma.
+
+## Redacting sensitive data
+
+If any part of your input is considered sensitive and you wish to redact it, you can mark it with `secret` directive. For example:
+
+```rust
+# extern crate async_graphql;
+# use async_graphql::*;
+#[derive(InputObject)]
+pub struct CredentialsInput {
+    username: String,
+    #[graphql(secret)]
+    password: String,
+}
+```

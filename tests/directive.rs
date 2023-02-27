@@ -2,46 +2,63 @@ use async_graphql::*;
 
 #[tokio::test]
 pub async fn test_directive_skip() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         pub async fn value(&self) -> i32 {
             10
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
-    let resp = schema
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    let data = schema
         .execute(
             r#"
-            {
+            fragment A on Query {
+                value5: value @skip(if: true)
+                value6: value @skip(if: false)
+            }
+            
+            query {
                 value1: value @skip(if: true)
                 value2: value @skip(if: false)
+                ... @skip(if: true) {
+                    value3: value
+                }
+                ... @skip(if: false) {
+                    value4: value
+                }
+                ... A
             }
         "#,
         )
-        .await;
+        .await
+        .into_result()
+        .unwrap()
+        .data;
     assert_eq!(
-        resp.data,
+        data,
         value!({
             "value2": 10,
+            "value4": 10,
+            "value6": 10,
         })
     );
 }
 
 #[tokio::test]
 pub async fn test_directive_include() {
-    struct QueryRoot;
+    struct Query;
 
     #[Object]
-    impl QueryRoot {
+    impl Query {
         pub async fn value(&self) -> i32 {
             10
         }
     }
 
-    let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+    let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
     let resp = schema
         .execute(
             r#"
@@ -61,57 +78,52 @@ pub async fn test_directive_include() {
 }
 
 #[tokio::test]
-pub async fn test_directive_ifdef() {
-    struct QueryRoot;
+pub async fn test_custom_directive() {
+    struct Concat {
+        prefix: String,
+        suffix: String,
+    }
 
-    #[Object]
-    impl QueryRoot {
-        pub async fn value1(&self) -> i32 {
-            10
+    #[async_trait::async_trait]
+    impl CustomDirective for Concat {
+        async fn resolve_field(
+            &self,
+            _ctx: &Context<'_>,
+            resolve: ResolveFut<'_>,
+        ) -> ServerResult<Option<Value>> {
+            resolve.await.map(|value| {
+                value.map(|value| match value {
+                    Value::String(str) => Value::String(self.prefix.clone() + &str + &self.suffix),
+                    _ => value,
+                })
+            })
         }
     }
 
-    struct MutationRoot;
+    #[Directive(location = "field")]
+    fn concat(prefix: String, suffix: String) -> impl CustomDirective {
+        Concat { prefix, suffix }
+    }
+
+    struct Query;
 
     #[Object]
-    impl MutationRoot {
-        pub async fn action1(&self) -> i32 {
-            10
+    impl Query {
+        pub async fn value(&self) -> &'static str {
+            "abc"
         }
     }
 
-    let schema = Schema::new(QueryRoot, MutationRoot, EmptySubscription);
-    let resp = schema
-        .execute(
-            r#"
-            {
-                value1 @ifdef
-                value2 @ifdef
-            }
-        "#,
-        )
-        .await;
+    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .directive(concat)
+        .finish();
     assert_eq!(
-        resp.data,
-        value!({
-            "value1": 10,
-        })
-    );
-
-    let resp = schema
-        .execute(
-            r#"
-            mutation {
-                action1 @ifdef
-                action2 @ifdef
-            }
-        "#,
-        )
-        .await;
-    assert_eq!(
-        resp.data,
-        value!({
-            "action1": 10,
-        })
+        schema
+            .execute(r#"{ value @concat(prefix: "&", suffix: "*") }"#)
+            .await
+            .into_result()
+            .unwrap()
+            .data,
+        value!({ "value": "&abc*" })
     );
 }

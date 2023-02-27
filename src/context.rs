@@ -1,26 +1,57 @@
 //! Query context.
 
-use std::any::{Any, TypeId};
-use std::collections::HashMap;
-use std::fmt::{self, Debug, Display, Formatter};
-use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::{
+    any::{Any, TypeId},
+    collections::HashMap,
+    fmt::{self, Debug, Display, Formatter},
+    ops::Deref,
+    sync::{Arc, Mutex},
+};
 
 use async_graphql_value::{Value as InputValue, Variables};
 use fnv::FnvHashMap;
-use http::header::{AsHeaderName, HeaderMap, IntoHeaderName};
-use serde::ser::{SerializeSeq, Serializer};
-use serde::Serialize;
+use http::{
+    header::{AsHeaderName, HeaderMap, IntoHeaderName},
+    HeaderValue,
+};
+use serde::{
+    ser::{SerializeSeq, Serializer},
+    Serialize,
+};
 
-use crate::extensions::Extensions;
-use crate::parser::types::{
-    Directive, Field, FragmentDefinition, OperationDefinition, Selection, SelectionSet,
-};
-use crate::schema::SchemaEnv;
 use crate::{
-    Error, InputType, Lookahead, Name, PathSegment, Pos, Positioned, Result, ServerError,
-    ServerResult, UploadValue, Value,
+    extensions::Extensions,
+    parser::types::{
+        Directive, Field, FragmentDefinition, OperationDefinition, Selection, SelectionSet,
+    },
+    schema::{IntrospectionMode, SchemaEnv},
+    Error, InputType, Lookahead, Name, OneofObjectType, PathSegment, Pos, Positioned, Result,
+    ServerError, ServerResult, UploadValue, Value,
 };
+
+/// Data related functions of the context.
+pub trait DataContext<'a> {
+    /// Gets the global data defined in the `Context` or `Schema`.
+    ///
+    /// If both `Schema` and `Query` have the same data type, the data in the
+    /// `Query` is obtained.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `Error` if the specified type data does not exist.
+    fn data<D: Any + Send + Sync>(&self) -> Result<&'a D>;
+
+    /// Gets the global data defined in the `Context` or `Schema`.
+    ///
+    /// # Panics
+    ///
+    /// It will panic if the specified data type does not exist.
+    fn data_unchecked<D: Any + Send + Sync>(&self) -> &'a D;
+
+    /// Gets the global data defined in the `Context` or `Schema` or `None` if
+    /// the specified type data does not exist.
+    fn data_opt<D: Any + Send + Sync>(&self) -> Option<&'a D>;
+}
 
 /// Schema/Context data.
 ///
@@ -41,6 +72,10 @@ impl Data {
     pub fn insert<D: Any + Send + Sync>(&mut self, data: D) {
         self.0.insert(TypeId::of::<D>(), Box::new(data));
     }
+
+    pub(crate) fn merge(&mut self, other: Data) {
+        self.0.extend(other.0);
+    }
 }
 
 impl Debug for Data {
@@ -55,10 +90,13 @@ pub type ContextSelectionSet<'a> = ContextBase<'a, &'a Positioned<SelectionSet>>
 /// Context object for resolve field
 pub type Context<'a> = ContextBase<'a, &'a Positioned<Field>>;
 
+/// Context object for execute directive.
+pub type ContextDirective<'a> = ContextBase<'a, &'a Positioned<Directive>>;
+
 /// A segment in the path to the current query.
 ///
-/// This is a borrowed form of [`PathSegment`](enum.PathSegment.html) used during execution instead
-/// of passed back when errors occur.
+/// This is a borrowed form of [`PathSegment`](enum.PathSegment.html) used
+/// during execution instead of passed back when errors occur.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(untagged)]
 pub enum QueryPathSegment<'a> {
@@ -108,7 +146,8 @@ impl<'a> Display for QueryPathNode<'a> {
 impl<'a> QueryPathNode<'a> {
     /// Get the current field name.
     ///
-    /// This traverses all the parents of the node until it finds one that is a field name.
+    /// This traverses all the parents of the node until it finds one that is a
+    /// field name.
     pub fn field_name(&self) -> &str {
         std::iter::once(self)
             .chain(self.parents())
@@ -162,12 +201,14 @@ impl<'a> QueryPathNode<'a> {
     }
 }
 
-/// An iterator over the parents of a [`QueryPathNode`](struct.QueryPathNode.html).
+/// An iterator over the parents of a
+/// [`QueryPathNode`](struct.QueryPathNode.html).
 #[derive(Debug, Clone)]
 pub struct Parents<'a>(&'a QueryPathNode<'a>);
 
 impl<'a> Parents<'a> {
-    /// Get the current query path node, which the next call to `next` will get the parents of.
+    /// Get the current query path node, which the next call to `next` will get
+    /// the parents of.
     #[must_use]
     pub fn current(&self) -> &'a QueryPathNode<'a> {
         self.0
@@ -195,6 +236,8 @@ impl<'a> std::iter::FusedIterator for Parents<'a> {}
 pub struct ContextBase<'a, T> {
     /// The current path node being resolved.
     pub path_node: Option<QueryPathNode<'a>>,
+    /// If `true` means the current field is for introspection.
+    pub(crate) is_for_introspection: bool,
     #[doc(hidden)]
     pub item: T,
     #[doc(hidden)]
@@ -213,8 +256,9 @@ pub struct QueryEnvInner {
     pub uploads: Vec<UploadValue>,
     pub session_data: Arc<Data>,
     pub ctx_data: Arc<Data>,
-    pub http_headers: Mutex<HeaderMap<String>>,
-    pub disable_introspection: bool,
+    pub extension_data: Arc<Data>,
+    pub http_headers: Mutex<HeaderMap>,
+    pub introspection_mode: IntrospectionMode,
     pub errors: Mutex<Vec<ServerError>>,
 }
 
@@ -245,10 +289,25 @@ impl QueryEnv {
     ) -> ContextBase<'a, T> {
         ContextBase {
             path_node,
+            is_for_introspection: false,
             item,
             schema_env,
             query_env: self,
         }
+    }
+}
+
+impl<'a, T> DataContext<'a> for ContextBase<'a, T> {
+    fn data<D: Any + Send + Sync>(&self) -> Result<&'a D> {
+        ContextBase::data::<D>(self)
+    }
+
+    fn data_unchecked<D: Any + Send + Sync>(&self) -> &'a D {
+        ContextBase::data_unchecked::<D>(self)
+    }
+
+    fn data_opt<D: Any + Send + Sync>(&self) -> Option<&'a D> {
+        ContextBase::data_opt::<D>(self)
     }
 }
 
@@ -263,6 +322,7 @@ impl<'a, T> ContextBase<'a, T> {
                 parent: self.path_node.as_ref(),
                 segment: QueryPathSegment::Name(&field.node.response_key().node),
             }),
+            is_for_introspection: self.is_for_introspection,
             item: field,
             schema_env: self.schema_env,
             query_env: self.query_env,
@@ -276,6 +336,7 @@ impl<'a, T> ContextBase<'a, T> {
     ) -> ContextBase<'a, &'a Positioned<SelectionSet>> {
         ContextBase {
             path_node: self.path_node,
+            is_for_introspection: self.is_for_introspection,
             item: selection_set,
             schema_env: self.schema_env,
             query_env: self.query_env,
@@ -300,14 +361,16 @@ impl<'a, T> ContextBase<'a, T> {
 
     /// Report a resolver error.
     ///
-    /// When implementing `OutputType`, if an error occurs, call this function to report this error and return `Value::Null`.
+    /// When implementing `OutputType`, if an error occurs, call this function
+    /// to report this error and return `Value::Null`.
     pub fn add_error(&self, error: ServerError) {
         self.query_env.errors.lock().unwrap().push(error);
     }
 
     /// Gets the global data defined in the `Context` or `Schema`.
     ///
-    /// If both `Schema` and `Query` have the same data type, the data in the `Query` is obtained.
+    /// If both `Schema` and `Query` have the same data type, the data in the
+    /// `Query` is obtained.
     ///
     /// # Errors
     ///
@@ -331,12 +394,14 @@ impl<'a, T> ContextBase<'a, T> {
             .unwrap_or_else(|| panic!("Data `{}` does not exist.", std::any::type_name::<D>()))
     }
 
-    /// Gets the global data defined in the `Context` or `Schema` or `None` if the specified type data does not exist.
+    /// Gets the global data defined in the `Context` or `Schema` or `None` if
+    /// the specified type data does not exist.
     pub fn data_opt<D: Any + Send + Sync>(&self) -> Option<&'a D> {
         self.query_env
-            .ctx_data
+            .extension_data
             .0
             .get(&TypeId::of::<D>())
+            .or_else(|| self.query_env.ctx_data.0.get(&TypeId::of::<D>()))
             .or_else(|| self.query_env.session_data.0.get(&TypeId::of::<D>()))
             .or_else(|| self.schema_env.data.0.get(&TypeId::of::<D>()))
             .and_then(|d| d.downcast_ref::<D>())
@@ -347,15 +412,14 @@ impl<'a, T> ContextBase<'a, T> {
     /// # Examples
     ///
     /// ```no_run
-    /// use async_graphql::*;
     /// use ::http::header::ACCESS_CONTROL_ALLOW_ORIGIN;
+    /// use async_graphql::*;
     ///
     /// struct Query;
     ///
     /// #[Object]
     /// impl Query {
     ///     async fn greet(&self, ctx: &Context<'_>) -> String {
-    ///
     ///         let header_exists = ctx.http_header_contains("Access-Control-Allow-Origin");
     ///         assert!(!header_exists);
     ///
@@ -378,26 +442,27 @@ impl<'a, T> ContextBase<'a, T> {
 
     /// Sets a HTTP header to response.
     ///
-    /// If the header was not currently set on the response, then `None` is returned.
+    /// If the header was not currently set on the response, then `None` is
+    /// returned.
     ///
-    /// If the response already contained this header then the new value is associated with this key
-    /// and __all the previous values are removed__, however only a the first previous
-    /// value is returned.
+    /// If the response already contained this header then the new value is
+    /// associated with this key and __all the previous values are
+    /// removed__, however only a the first previous value is returned.
     ///
-    /// See [`http::HeaderMap`] for more details on the underlying implementation
+    /// See [`http::HeaderMap`] for more details on the underlying
+    /// implementation
     ///
     /// # Examples
     ///
     /// ```no_run
+    /// use ::http::{header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue};
     /// use async_graphql::*;
-    /// use ::http::header::ACCESS_CONTROL_ALLOW_ORIGIN;
     ///
     /// struct Query;
     ///
     /// #[Object]
     /// impl Query {
     ///     async fn greet(&self, ctx: &Context<'_>) -> String {
-    ///
     ///         // Headers can be inserted using the `http` constants
     ///         let was_in_headers = ctx.insert_http_header(ACCESS_CONTROL_ALLOW_ORIGIN, "*");
     ///         assert_eq!(was_in_headers, None);
@@ -410,7 +475,7 @@ impl<'a, T> ContextBase<'a, T> {
     ///         // one overwrites the previous. If you want multiple headers for the same key, use
     ///         // `append_http_header` for subsequent headers
     ///         let was_in_headers = ctx.insert_http_header("Custom-Header", "Hello World");
-    ///         assert_eq!(was_in_headers, Some("1234".to_string()));
+    ///         assert_eq!(was_in_headers, Some(HeaderValue::from_static("1234")));
     ///
     ///         String::from("Hello world")
     ///     }
@@ -419,30 +484,37 @@ impl<'a, T> ContextBase<'a, T> {
     pub fn insert_http_header(
         &self,
         name: impl IntoHeaderName,
-        value: impl Into<String>,
-    ) -> Option<String> {
-        self.query_env
-            .http_headers
-            .lock()
-            .unwrap()
-            .insert(name, value.into())
+        value: impl TryInto<HeaderValue>,
+    ) -> Option<HeaderValue> {
+        if let Ok(value) = value.try_into() {
+            self.query_env
+                .http_headers
+                .lock()
+                .unwrap()
+                .insert(name, value)
+        } else {
+            None
+        }
     }
 
     /// Sets a HTTP header to response.
     ///
-    /// If the header was not currently set on the response, then `false` is returned.
+    /// If the header was not currently set on the response, then `false` is
+    /// returned.
     ///
-    /// If the response did have this header then the new value is appended to the end of the
-    /// list of values currently associated with the key, however the key is not updated
-    /// _(which is important for types that can be `==` without being identical)_.
+    /// If the response did have this header then the new value is appended to
+    /// the end of the list of values currently associated with the key,
+    /// however the key is not updated _(which is important for types that
+    /// can be `==` without being identical)_.
     ///
-    /// See [`http::HeaderMap`] for more details on the underlying implementation
+    /// See [`http::HeaderMap`] for more details on the underlying
+    /// implementation
     ///
     /// # Examples
     ///
     /// ```no_run
-    /// use async_graphql::*;
     /// use ::http::header::SET_COOKIE;
+    /// use async_graphql::*;
     ///
     /// struct Query;
     ///
@@ -460,12 +532,20 @@ impl<'a, T> ContextBase<'a, T> {
     ///     }
     /// }
     /// ```
-    pub fn append_http_header(&self, name: impl IntoHeaderName, value: impl Into<String>) -> bool {
-        self.query_env
-            .http_headers
-            .lock()
-            .unwrap()
-            .append(name, value.into())
+    pub fn append_http_header(
+        &self,
+        name: impl IntoHeaderName,
+        value: impl TryInto<HeaderValue>,
+    ) -> bool {
+        if let Ok(value) = value.try_into() {
+            self.query_env
+                .http_headers
+                .lock()
+                .unwrap()
+                .append(name, value)
+        } else {
+            false
+        }
     }
 
     fn var_value(&self, name: &str, pos: Pos) -> ServerResult<Value> {
@@ -487,7 +567,7 @@ impl<'a, T> ContextBase<'a, T> {
             })
     }
 
-    fn resolve_input_value(&self, value: Positioned<InputValue>) -> ServerResult<Value> {
+    pub(crate) fn resolve_input_value(&self, value: Positioned<InputValue>) -> ServerResult<Value> {
         let pos = value.pos;
         value
             .node
@@ -495,50 +575,43 @@ impl<'a, T> ContextBase<'a, T> {
     }
 
     #[doc(hidden)]
-    pub fn is_ifdef(&self, directives: &[Positioned<Directive>]) -> bool {
-        directives
+    fn get_param_value<Q: InputType>(
+        &self,
+        arguments: &[(Positioned<Name>, Positioned<InputValue>)],
+        name: &str,
+        default: Option<fn() -> Q>,
+    ) -> ServerResult<(Pos, Q)> {
+        let value = arguments
             .iter()
-            .any(|directive| directive.node.name.node == "ifdef")
-    }
-
-    #[doc(hidden)]
-    pub fn is_skip(&self, directives: &[Positioned<Directive>]) -> ServerResult<bool> {
-        for directive in directives {
-            let include = match &*directive.node.name.node {
-                "skip" => false,
-                "include" => true,
-                _ => continue,
-            };
-
-            let condition_input = directive
-                .node
-                .get_argument("if")
-                .ok_or_else(|| ServerError::new(format!(r#"Directive @{} requires argument `if` of type `Boolean!` but it was not provided."#, if include { "include" } else { "skip" }),Some(directive.pos)))?
-                .clone();
-
-            let pos = condition_input.pos;
-            let condition_input = self.resolve_input_value(condition_input)?;
-
-            if include
-                != <bool as InputType>::parse(Some(condition_input))
-                    .map_err(|e| e.into_server_error(pos))?
-            {
-                return Ok(true);
+            .find(|(n, _)| n.node.as_str() == name)
+            .map(|(_, value)| value)
+            .cloned();
+        if value.is_none() {
+            if let Some(default) = default {
+                return Ok((Pos::default(), default()));
             }
         }
-
-        Ok(false)
+        let (pos, value) = match value {
+            Some(value) => (value.pos, Some(self.resolve_input_value(value)?)),
+            None => (Pos::default(), None),
+        };
+        InputType::parse(value)
+            .map(|value| (pos, value))
+            .map_err(|e| e.into_server_error(pos))
     }
-}
 
-impl<'a> ContextBase<'a, &'a Positioned<SelectionSet>> {
     #[doc(hidden)]
-    pub fn with_index(&'a self, idx: usize) -> ContextBase<'a, &'a Positioned<SelectionSet>> {
+    #[must_use]
+    pub fn with_index(&'a self, idx: usize) -> ContextBase<'a, T>
+    where
+        T: Copy,
+    {
         ContextBase {
             path_node: Some(QueryPathNode {
                 parent: self.path_node.as_ref(),
                 segment: QueryPathSegment::Index(idx),
             }),
+            is_for_introspection: self.is_for_introspection,
             item: self.item,
             schema_env: self.schema_env,
             query_env: self.query_env,
@@ -552,18 +625,24 @@ impl<'a> ContextBase<'a, &'a Positioned<Field>> {
         &self,
         name: &str,
         default: Option<fn() -> T>,
-    ) -> ServerResult<T> {
-        let value = self.item.node.get_argument(name).cloned();
-        if value.is_none() {
-            if let Some(default) = default {
-                return Ok(default());
-            }
+    ) -> ServerResult<(Pos, T)> {
+        self.get_param_value(&self.item.node.arguments, name, default)
+    }
+
+    #[doc(hidden)]
+    pub fn oneof_param_value<T: OneofObjectType>(&self) -> ServerResult<(Pos, T)> {
+        use indexmap::IndexMap;
+
+        let mut map = IndexMap::new();
+
+        for (name, value) in &self.item.node.arguments {
+            let value = self.resolve_input_value(value.clone())?;
+            map.insert(name.node.clone(), value);
         }
-        let (pos, value) = match value {
-            Some(value) => (value.pos, Some(self.resolve_input_value(value)?)),
-            None => (Pos::default(), None),
-        };
-        InputType::parse(value).map_err(|e| e.into_server_error(pos))
+
+        InputType::parse(Some(Value::Object(map)))
+            .map(|value| (self.item.pos, value))
+            .map_err(|e| e.into_server_error(self.item.pos))
     }
 
     /// Creates a uniform interface to inspect the forthcoming selections.
@@ -603,7 +682,7 @@ impl<'a> ContextBase<'a, &'a Positioned<Field>> {
     /// }
     /// ```
     pub fn look_ahead(&self) -> Lookahead {
-        Lookahead::new(&self.query_env.fragments, &self.item.node)
+        Lookahead::new(&self.query_env.fragments, &self.item.node, self)
     }
 
     /// Get the current field.
@@ -625,19 +704,25 @@ impl<'a> ContextBase<'a, &'a Positioned<Field>> {
     /// #[Object]
     /// impl Query {
     ///     async fn obj(&self, ctx: &Context<'_>) -> MyObj {
-    ///         let fields = ctx.field().selection_set().map(|field| field.name()).collect::<Vec<_>>();
+    ///         let fields = ctx
+    ///             .field()
+    ///             .selection_set()
+    ///             .map(|field| field.name())
+    ///             .collect::<Vec<_>>();
     ///         assert_eq!(fields, vec!["a", "b", "c"]);
     ///         MyObj { a: 1, b: 2, c: 3 }
     ///     }
     /// }
     ///
-    /// tokio::runtime::Runtime::new().unwrap().block_on(async move {
-    ///     let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
-    ///     assert!(schema.execute("{ obj { a b c }}").await.is_ok());
-    ///     assert!(schema.execute("{ obj { a ... { b c } }}").await.is_ok());
-    ///     assert!(schema.execute("{ obj { a ... BC }} fragment BC on MyObj { b c }").await.is_ok());
-    /// });
-    ///
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async move {
+    /// let schema = Schema::new(Query, EmptyMutation, EmptySubscription);
+    /// assert!(schema.execute("{ obj { a b c }}").await.is_ok());
+    /// assert!(schema.execute("{ obj { a ... { b c } }}").await.is_ok());
+    /// assert!(schema
+    ///     .execute("{ obj { a ... BC }} fragment BC on MyObj { b c }")
+    ///     .await
+    ///     .is_ok());
+    /// # });
     /// ```
     pub fn field(&self) -> SelectionField {
         SelectionField {
@@ -648,12 +733,23 @@ impl<'a> ContextBase<'a, &'a Positioned<Field>> {
     }
 }
 
+impl<'a> ContextBase<'a, &'a Positioned<Directive>> {
+    #[doc(hidden)]
+    pub fn param_value<T: InputType>(
+        &self,
+        name: &str,
+        default: Option<fn() -> T>,
+    ) -> ServerResult<(Pos, T)> {
+        self.get_param_value(&self.item.node.arguments, name, default)
+    }
+}
+
 /// Selection field.
 #[derive(Clone, Copy)]
 pub struct SelectionField<'a> {
     pub(crate) fragments: &'a HashMap<Name, Positioned<FragmentDefinition>>,
     pub(crate) field: &'a Field,
-    context: &'a Context<'a>,
+    pub(crate) context: &'a Context<'a>,
 }
 
 impl<'a> SelectionField<'a> {
@@ -727,7 +823,9 @@ impl<'a> Iterator for SelectionFieldsIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let it = self.iter.last_mut()?;
-            match it.next() {
+            let item = it.next();
+
+            match item {
                 Some(selection) => match &selection.node {
                     Selection::Field(field) => {
                         return Some(SelectionField {
